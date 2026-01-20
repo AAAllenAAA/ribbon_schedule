@@ -1,0 +1,12 @@
+{
+    "base_path": "E:\\\\ribbon_schedule\\\\data\\\\基本資料-20250617-All.xlsx",
+    "schedule_history_path_old": "E:\\\\ribbon_schedule\\\\history\\\\history_10_actual_month.csv",
+    "schedule_history_path": "E:\\\\ribbon_schedule\\\\history\\\\history.csv",
+    "db_config": {
+        "host": "localhost",
+        "user": "root",
+        "password": "",
+        "database": "test"
+    },
+    "capacity_percent": 33605
+}
