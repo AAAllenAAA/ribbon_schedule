@@ -145,7 +145,6 @@ def get_holiday_multiplier_map(holiday_list):
     return multiplier_map
 
 
-
 def process_schedule_data():
     # 讓使用者選擇排程資料 Excel
 
