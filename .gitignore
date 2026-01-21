@@ -10,5 +10,9 @@
 # 允許追蹤 .gitignore 自己 (建議保留)
 !.gitignore
 
+# 4. 放行 php 資料夾及其內的所有內容
+!php/
+!php/**
+
 # 徹底封鎖那個巨大的 SDK 資料夾
 training_AI/
