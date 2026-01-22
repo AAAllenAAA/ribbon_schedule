@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 
 <head>
-    
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>排程處理結果</title>
@@ -113,7 +113,7 @@
     <div class="container">
         <h1>排程任務結果</h1>
         <?php
-        
+
         if (isset($_POST['submit'])) {
             // 1. 設定存檔與讀取路徑
             $uploadDir = "E:/ribbon_schedule/test_report_upload/";
@@ -171,9 +171,27 @@
                 return date('Y-m-d', strtotime($dateStr));
             }
 
+            function addBusinessDays($dateStr, $days)
+            {
+                $date = new DateTime($dateStr);
+                $count = abs($days); // abs = 取絕對值
+                $step = $days > 0 ? 1 : -1;
+
+                while ($count > 0) {
+                    // modify: PHP DataTime內建方法 專門用於改變日期物件的值
+                    // 所以 以下這段程式可以解釋為 加/減 一天
+                    $date->modify("$step day");
+                    // 檢查是否為週一至週五 (1-5)
+                    if ($date->format('N') <= 5) {
+                        $count--;
+                    }
+                }
+                return $date->format('Y-m-d');
+            }
+
             $data = [
-                "start_range" => cleanDate($_POST['start_range']) ?? '',
-                "end_range" => cleanDate($_POST['end_range']) ?? '',
+                //"start_range" => cleanDate($_POST['start_range']) ?? '',
+                //"end_range" => cleanDate($_POST['end_range']) ?? '',
                 "start_date" => cleanDate($_POST['start_date']) ?? '',
                 "week_81B_user" => $_POST['81B_user'] ?? '',
 
@@ -194,6 +212,19 @@
             if (flock($fp, LOCK_EX)) {
                 // 【保護區開始】這裡面的動作一次只能有一個人做
         
+                $startDateStr = $data['start_date'];
+
+                if ($data['run_mode'] === 'schedule') {
+                    // --- 預排模式：使用 User 從前端輸入的日期 ---
+                    // 建議還是用 cleanDate 處理一下確保安全
+                    $data['start_range'] = cleanDate($_POST['start_range']) ?? $startDateStr;
+                    $data['end_range'] = cleanDate($_POST['end_range']) ?? $startDateStr;
+                } else {
+                    // --- 當日模式 (daily)：自動計算前後 20 個工作天 ---
+                    $data['start_range'] = addBusinessDays($startDateStr, -20);
+                    $data['end_range'] = addBusinessDays($startDateStr, 20);
+                }
+
                 // A. 寫入 JSON 設定檔
                 $jsonConfigFile = $uploadDir_json . "config_data.json";
                 file_put_contents($jsonConfigFile, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));

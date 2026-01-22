@@ -230,10 +230,11 @@ header("Expires: Wed, 11 Jan 1984 05:00:00 GMT");
                     <input type="file" name="file" id="file" class="form-control" accept=".csv,.xls,.xlsx">
                 </div>
 
-                <div class="form-group">
+
+                <div class="form-group" id="date_range_group" style="display: none;">
                     <label>電子報日期區間：</label>
-                    <input type="date" id="start_range" name="start_range" class="form-control" required>
-                    <input type="date" id="end_range" name="end_range" class="form-control" required>
+                    <input type="date" id="start_range" name="start_range" class="form-control">
+                    <input type="date" id="end_range" name="end_range" class="form-control">
                 </div>
 
                 <div class="form-group">
@@ -522,17 +523,44 @@ header("Expires: Wed, 11 Jan 1984 05:00:00 GMT");
 
                 // 2. 定義切換限制的函式 (讓 HTML 的 onclick 呼叫)
                 function toggleDateConstraint() {
-                    // 檢查目前選中的模式
+                    // 1. 取得 DOM 元素
                     const isDaily = document.getElementById("mode_daily").checked;
+                    const dateRangeGroup = document.getElementById("date_range_group"); // 對應剛才加 id 的 div
+                    const startRange = document.getElementById("start_range");
+                    const endRange = document.getElementById("end_range");
+
+                    // 假設你原本 HTML 裡面還有一個叫做 startDate 的欄位
+                    const startDate = document.getElementById("start_date");
 
                     if (isDaily) {
-                        // 當日模式：立刻套用目前的區間限制
-                        startDate.min = startRange.value;
-                        startDate.max = endRange.value;
+                        // --- 當日模式 ---
+                        // A. 隱藏區間選擇區塊
+                        dateRangeGroup.style.display = "none";
+
+                        // B. 你原有的邏輯：套用限制 (如果 startDate 存在的話)
+                        if (startDate && startRange.value && endRange.value) {
+                            startDate.min = startRange.value;
+                            startDate.max = endRange.value;
+                        }
+
+                        // C. 取消必填
+                        startRange.required = false;
+                        endRange.required = false;
+
                     } else {
-                        // 預排模式：移除所有日期限制
-                        startDate.removeAttribute("min");
-                        startDate.removeAttribute("max");
+                        // --- 預排模式 ---
+                        // A. 顯示區間選擇區塊
+                        dateRangeGroup.style.display = "block";
+
+                        // B. 你原有的邏輯：移除限制
+                        if (startDate) {
+                            startDate.removeAttribute("min");
+                            startDate.removeAttribute("max");
+                        }
+
+                        // C. 設為必填 (因為預排需要知道範圍)
+                        startRange.required = true;
+                        endRange.required = true;
                     }
                 }
 

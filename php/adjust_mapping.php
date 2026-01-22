@@ -60,8 +60,14 @@
                     $('#mapping_result').html(response);
 
                     // 2. 顯示新增區塊，並自動填入主料號
-                    $('#add_section').show();
-                    $('input[name="main_ProductInfo"]').val(keyword);
+                    if (response.indexOf('alert-warning') !== -1 || response.indexOf('沒有資料') !== -1) {
+                        // 搜尋無結果，隱藏新增區塊
+                        $('#add_section').hide();
+                    } else {
+                        // 搜尋有結果，顯示新增區塊並填入料號
+                        $('#add_section').show();
+                        $('input[name="main_ProductInfo"]').val(keyword);
+                    }
                 },
                 error: function () {
                     alert('搜尋失敗，請檢查資料庫連線');

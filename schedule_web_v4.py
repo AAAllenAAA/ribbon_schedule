@@ -209,7 +209,7 @@ def process_schedule_data():
     order_df = order_df[~order_df["工單號碼"].str.startswith(("81R", "81T"))]
     #order_df = order_df[order_df["工單號碼"].str.startswith(("81A"))]
     order_df = order_df[order_df["狀態"].str.lower() == "released"] 
-    order_df = choose_date(order_df)  # 假設 choose_date 已定義
+    #order_df = choose_date(order_df)  # 假設 choose_date 已定義
 
     
     # rename base_df
@@ -4620,7 +4620,7 @@ def do_people(final_df):
     return A159_part, A830_part, B201_part
 
 
-def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookback_days: int = 65) -> pd.DataFrame:
+def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookback_days: int = 100) -> pd.DataFrame:
 
     df = df.copy()
     df["預計開工日"] = pd.to_datetime(df["預計開工日"])
