@@ -3,10 +3,10 @@
     "schedule_history_path_old": "E:\\\\ribbon_schedule\\\\history\\\\history_10_actual_month.csv",
     "schedule_history_path": "E:\\\\ribbon_schedule\\\\history\\\\history.csv",
     "db_config": {
-        "host": "localhost",
-        "user": "root",
-        "password": "",
-        "database": "test"
+        "host": "192.168.117.55",
+        "user": "allen",
+        "password": "unitech",
+        "database": "ribbon_test"
     },
     "capacity_percent": 33605
 }

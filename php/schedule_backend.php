@@ -152,8 +152,8 @@
                     // 只有在開始跟結束都有填值的時候才加入
                     if (!empty($startTime) && !empty($ends[$i])) {
 
-                        $cleanStart = date('Y-m-d', strtotime($startTime));
-                        $cleanEnd = date('Y-m-d', strtotime($ends[$i]));
+                        $cleanStart = date('Y-m-d H:i', strtotime($startTime));
+                        $cleanEnd = date('Y-m-d H:i', strtotime($ends[$i]));
 
                         $combined[] = [
                             "start" => $cleanStart,
@@ -221,8 +221,8 @@
                     $data['end_range'] = cleanDate($_POST['end_range']) ?? $startDateStr;
                 } else {
                     // --- 當日模式 (daily)：自動計算前後 20 個工作天 ---
-                    $data['start_range'] = addBusinessDays($startDateStr, -20);
-                    $data['end_range'] = addBusinessDays($startDateStr, 20);
+                    $data['start_range'] = addBusinessDays($startDateStr, -30);
+                    $data['end_range'] = addBusinessDays($startDateStr, 30);
                 }
 
                 // A. 寫入 JSON 設定檔

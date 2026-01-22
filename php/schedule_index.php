@@ -446,6 +446,13 @@ header("Expires: Wed, 11 Jan 1984 05:00:00 GMT");
 
                     // 5. 重新禁用按鈕，並為「結束時間」添加監聽器
                     addButton.disabled = true;
+
+                    // 使用 input 事件：User 一選完日期，按鈕就亮
+                    inputEnd.addEventListener('input', function () {
+                        checkLastInput(containerId);
+                    });
+
+                    // 保留原本的 change 事件作為保險
                     inputEnd.addEventListener('change', function () {
                         checkLastInput(containerId);
                     });
@@ -580,10 +587,25 @@ header("Expires: Wed, 11 Jan 1984 05:00:00 GMT");
 
                 // 頁面載入/回退時的監聽器 (解決返回時資料殘留問題)
                 window.addEventListener('pageshow', function (event) {
-                    // 如果頁面是從快取（按返回鍵）載入的
                     if (event.persisted) {
-                        // 強制頁面重新整理，這會發送新的 Request 到伺服器，Log 就會出現了
                         window.location.reload();
+                    } else {
+                        // 頁面第一次載入時，主動幫現有的輸入框綁定監聽
+                        // 這樣一進頁面，選了日期按鈕才會亮
+                        ['personA_holidays', 'personB_holidays', 'personC_holidays'].forEach(id => {
+                            const container = document.getElementById(id);
+                            const inputs = container.querySelectorAll('input[type="datetime-local"]');
+
+                            inputs.forEach(input => {
+                                // 同時監聽 input 和 change，確保秒亮
+                                input.addEventListener('input', () => checkLastInput(id));
+                                input.addEventListener('change', () => checkLastInput(id));
+                                input.classList.add('input-listener-added');
+                            });
+
+                            // 順便檢查一次狀態（萬一瀏覽器記住了之前的數值）
+                            checkLastInput(id);
+                        });
                     }
                 });
             </script>

@@ -42,7 +42,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-print = block_print
+#print = block_print
 
 def update_global_order_qty_map(df):
     """
@@ -251,10 +251,62 @@ def process_schedule_data():
     df = merged.copy()
     df_history = load_schedule_history(config)
 
+    # --- 1. 資料庫同步 ---
+    target_orders = df['工單號碼'].unique().tolist()
+    if target_orders:
+        orders_placeholder = "('" + "','".join(map(str, target_orders)) + "')"
+        print(orders_placeholder)
+        try:
+            conn = mysql.connector.connect(**db_config)
+            sql_query = f"""
+                SELECT 
+                    A.wo_SN AS wo_SN_clean, 
+                    IFNULL(SUM(A.wo_ForceProNum), 0) as 庫存完工量, 
+                    IFNULL(B_Sub.total_good, 0) as 額外調整量
+                FROM workorder A
+                LEFT JOIN (
+                    SELECT wo_SN, SUM(amount_good) as total_good
+                    FROM packageaction
+                    WHERE action = 'warehouse_bepaired'
+                      AND wo_SN IN {orders_placeholder}
+                    GROUP BY wo_SN
+                ) B_Sub ON A.wo_SN = B_Sub.wo_SN
+                WHERE A.wo_SN IN {orders_placeholder}
+                GROUP BY A.wo_SN
+            """
+            db_df = pd.read_sql(sql_query, conn).fillna(0)
+            conn.close()
+            print("\n🔍 [診斷] 資料庫回傳的原始內容：")
+            print(db_df)
+
+            # --- 強力清洗 A：資料庫回傳的資料 ---
+            db_df['wo_SN_clean'] = db_df['wo_SN_clean'].astype(str).str.strip().str.upper() # 轉大寫且去空格
+            db_df = db_df.rename(columns={'wo_SN_clean': '工單號碼'})
+            # 確保資料庫回傳只有一筆（防止產生重複行）
+            db_df = db_df.groupby('工單號碼', as_index=False).sum()
+
+            # --- 強力清洗 B：主表資料 ---
+            df['工單號碼'] = df['工單號碼'].astype(str).str.strip().str.upper() # 轉大寫且去空格
+            
+            # 移除可能導致衝突的舊欄位
+            df = df.drop(columns=['庫存完工量', '額外調整量'], errors='ignore')
+
+            # --- 執行合併 ---
+            df = df.merge(db_df, on='工單號碼', how='left')
+
+            # --- 補零與計算 ---
+            df['庫存完工量'] = pd.to_numeric(df['庫存完工量'], errors='coerce').fillna(0)
+            df['額外調整量'] = pd.to_numeric(df['額外調整量'], errors='coerce').fillna(0)
+            df['開工數量'] = (pd.to_numeric(df['開工數量'], errors='coerce').fillna(0) - (df['庫存完工量'] + df['額外調整量'])).clip(lower=0)
+
+        except Exception as e:
+            print(f"❌ 資料庫同步失敗: {e}")
+
+
+
+    # --- 2. 處理歷史資料 (獨立區塊) ---
     if not df_history.empty:
         print("歷史資料載入...")
-
-        # 統一欄位名稱
         df_history = df_history.rename(columns={'工單編號': '工單號碼', '品號': '料號'})
         for col in ['工單號碼', '料號']:
             if col in df_history.columns:
@@ -262,67 +314,35 @@ def process_schedule_data():
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip()
 
-        # 數值欄位
         if '預估良品數' in df_history.columns:
             df_history['預估良品數'] = pd.to_numeric(df_history['預估良品數'], errors='coerce').fillna(0)
-        df['開工數量'] = pd.to_numeric(df['開工數量'], errors='coerce').fillna(0)
-        df['完工數量'] = pd.to_numeric(df['完工數量'], errors='coerce').fillna(0)
 
-        # 歷史已排數量
         df_history_used_qty = df_history.groupby(['工單號碼', '料號'], as_index=False)['預估良品數'].sum()
         df_history_used_qty = df_history_used_qty.rename(columns={'預估良品數': '昨日已排數量'})
         df = df.merge(df_history_used_qty, on=['工單號碼', '料號'], how='left').fillna(0)
 
-        # ------------------------------------------------------------------
-        # ⭐ 修正：使用 np.maximum 確保用最大已處理數量來扣減
-        # ------------------------------------------------------------------
-        # 1. 找出最大已完成/已排量
-        df['最大已處理數量'] = np.maximum(df['完工數量'], df['昨日已排數量'])
-     
-        # 2. 扣除數量：用原始開工數量減去最大已處理數量，並確保不小於 0
-        df['開工數量'] = (df['開工數量'] - df['最大已處理數量']).clip(lower=0)
-        
-        # 3. 準備列印資訊
-        # 將 '最大已處理數量' 暫存為 '昨日已排數量' 以便列印原開工數量
-        df['昨日已排數量_PRINT'] = df['最大已處理數量']
-        df.drop(columns=['最大已處理數量'], errors='ignore', inplace=True)
-        
-        # ------------------------------------------------------------------
+    # --- 3. 過濾與清理 (移出歷史資料區塊) ---
+    
+    # ⭐ 關鍵：先定義 completed_orders
+    completed_orders = df[df['開工數量'] <= 0]['工單號碼'].unique().tolist()
 
-        # 列印明細
-        print("=== 扣除歷史數量後的工單明細 ===")
-        for _, row in df.iterrows():
-            # 由於我們已用最大值扣減，這裡計算原開工數量時使用 '昨日已排數量_PRINT'
-            print(f"工單: {row['工單號碼']}, 料號: {row['料號']}, "
-                  f"原開工數量: {row['開工數量'] + row['昨日已排數量_PRINT']}, "
-                  f"最大已處理: {row['昨日已排數量_PRINT']}, 剩餘: {row['開工數量']}")
-        
-        # 移除輔助列印欄位
-        df.drop(columns=['昨日已排數量', '昨日已排數量_PRINT'], errors='ignore', inplace=True)
+    # 移除完成工單 (保留剩餘數量 > 0 的)
+    df = df[df['開工數量'] > 0].copy()
 
-
-        # 已完成工單
-        completed_orders = df[df['開工數量'] <= 0]['工單號碼'].unique()
-        if len(completed_orders) > 0:
-            print("=== 已完成工單 ===")
-            print(completed_orders)
-
-        # 移除完成工單
-        df = df[df['開工數量'] > 0].copy()
-
-        # 排除備註引用已完成工單
-        if '備註' in df.columns:
-            def check_exclude(note):
-                if pd.isna(note):
-                    return False
-                note_prefix = str(note)[:8]
-                return note_prefix in completed_orders
-            df['exclude_by_note'] = df['備註'].apply(check_exclude)
-            excluded_count = df['exclude_by_note'].sum()
-            if excluded_count > 0:
-                print(f"排除 {excluded_count} 筆備註引用已完成工單的工單")
-            df = df[df['exclude_by_note'] == False].copy()
-            df.drop(columns=['exclude_by_note'], inplace=True)
+    # 排除備註引用已完成工單
+    if '備註' in df.columns and completed_orders:
+        def check_exclude(note):
+            if pd.isna(note):
+                return False
+            note_prefix = str(note)[:8].strip()
+            return note_prefix in completed_orders
+            
+        df['exclude_by_note'] = df['備註'].apply(check_exclude)
+        excluded_count = df['exclude_by_note'].sum()
+        if excluded_count > 0:
+            print(f"排除 {excluded_count} 筆備註引用已完成工單的工單")
+        df = df[df['exclude_by_note'] == False].copy()
+        df.drop(columns=['exclude_by_note'], inplace=True, errors='ignore')
 
     # === 更新全域工單數量 map ===
     update_global_order_qty_map(df)
@@ -4620,7 +4640,7 @@ def do_people(final_df):
     return A159_part, A830_part, B201_part
 
 
-def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookback_days: int = 100) -> pd.DataFrame:
+def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookback_days: int = 165) -> pd.DataFrame:
 
     df = df.copy()
     df["預計開工日"] = pd.to_datetime(df["預計開工日"])
@@ -5567,6 +5587,20 @@ def do_newsheet_for_81B(all_final_combined):
     file_path = config_user.get("uploaded_file")
     order_df = pd.read_excel(file_path, dtype=str)
 
+    # 取得今天星期幾 (0 是週一, 6 是週日)
+    today_weekday = datetime.now().weekday()
+
+    if today_weekday == 0:  # 如果今天是週一
+        # 減去 3 天回到上週五
+        days_to_subtract = 3
+    else:
+        # 其他日子則減去 1 天
+        # 注意：如果你週六日不工作，想在週二撈週一的資料，這裡維持 1 即可
+        days_to_subtract = 1
+
+    yesterday_date = datetime.now() - timedelta(days=days_to_subtract)
+    yesterday_str = yesterday_date.strftime('%Y/%m/%d')
+
     # 抽出 81B 資料
     all_81B = all_final_combined[all_final_combined["唯一主工單ID"].str.startswith("81B", na=False)].copy()
     all_81B['刀次_num'] = pd.to_numeric(all_81B['刀次'], errors='coerce').fillna(0)
@@ -5584,6 +5618,12 @@ def do_newsheet_for_81B(all_final_combined):
 
     order_ref = order_df[['工單號碼', '核發日期', '開工數量']].drop_duplicates('工單號碼')
     main_df = main_df.merge(order_ref, left_on='工單編號', right_on='工單號碼', how='left')
+
+    main_df = main_df[main_df['核發日期'].str.contains(yesterday_str, na=False)]
+
+    # 如果篩選後 main_df 是空的，直接回傳空表格避免後續出錯
+    if main_df.empty:
+        return pd.DataFrame(columns=['核發日期', '主工單號碼', '主料號']).style
 
     # --- 3. 處理子工單：水平展開並自定義順序 ---
     sub_raw = all_81B[all_81B['刀次_num'] == 0].copy()
@@ -5905,12 +5945,11 @@ def main():
 
     A830_new, B201_new, A159_new = Erin_use2(A830_new_rebalance, B201_new_rebalance, A159_new_rebalance, break_dates)
 
-    A830_new, B201_new, A159_new = check_initated(A830_new, B201_new, A159_new, df_history)
-
     result_check = check_Qty(A830_new, B201_new, A159_new)
     print(result_check)
-
     
+    A830_new, B201_new, A159_new = check_initated(A830_new, B201_new, A159_new, df_history)
+
 
     # ==============================================================================================================
     # === 寫入 Excel ===
