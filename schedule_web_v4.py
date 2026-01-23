@@ -42,7 +42,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-#print = block_print
+print = block_print
 
 def update_global_order_qty_map(df):
     """
@@ -276,7 +276,7 @@ def process_schedule_data():
             """
             db_df = pd.read_sql(sql_query, conn).fillna(0)
             conn.close()
-            print("\n🔍 [診斷] 資料庫回傳的原始內容：")
+            print("\n資料庫回傳的原始內容：")
             print(db_df)
 
             # --- 強力清洗 A：資料庫回傳的資料 ---
@@ -3618,6 +3618,103 @@ def Erin_use2(A830_df, B201_df, A159_df, holiday_maps):
     return results[0], results[1], results[2]
 
 
+def Erin_use3(A830_df, B201_df, A159_df):
+
+    script_dir = os.path.dirname(os.path.abspath(__file__)) 
+    user_path = os.path.join(script_dir, "E:/ribbon_schedule/test_report_upload/json/config_data.json")
+    
+    with open(user_path, "r", encoding="utf-8") as f:
+        config_user = json.load(f)
+    3
+    file_path = config_user.get("uploaded_file")
+    
+    # --- 修改點：讀取時確保不產生亂碼 ---
+    order_df = pd.read_excel(file_path, dtype=str)
+    
+    # 這裡印出來檢查，如果看到亂碼，我們就用索引(Index)來取欄位
+    print("Excel 原始欄位清單:", order_df.columns.tolist())
+
+    # --- 防呆處理：如果欄位名稱亂碼，強迫重新命名 ---
+    # 假設第一欄是工單號碼，第二欄是開工數量（請依你 Excel 實際順序調整）
+    # 或者用 .str.contains 模糊尋找
+    target_col = [c for c in order_df.columns if "工單號碼" in str(c)]
+    qty_col = [c for c in order_df.columns if "開工數量" in str(c)]
+    
+    if target_col and qty_col:
+        order_df = order_df.rename(columns={target_col[0]: '工單號碼', qty_col[0]: '開工數量'})
+    else:
+        print("⚠️ 找不到指定欄位名稱，嘗試使用位置索引命名")
+        order_df.columns.values[0] = "工單號碼" 
+        order_df.columns.values[11] = "開工數量" 
+
+    order_df = order_df[['工單號碼', '開工數量']].copy()
+    order_df['工單號碼'] = order_df['工單號碼'].astype(str).str.strip()
+    order_df['開工數量'] = pd.to_numeric(order_df['開工數量'], errors='coerce').fillna(0)
+    
+    def merge_qty(person_df):
+        if person_df is None or person_df.empty:
+            return person_df
+
+        # 1. 確保工單編號格式，但不強行轉換 NaN，避免空值變成了字串 "nan"
+        # 我們只對非空值的部分做 strip
+        person_df['工單編號'] = person_df['工單編號'].astype(str).str.strip().replace('nan', np.nan)
+
+        # 移除舊的開工數量避免衝突
+        if '開工數量' in person_df.columns:
+            person_df = person_df.drop(columns=['開工數量'])
+        
+        # 2. 執行合併
+        result_df = person_df.merge(
+            order_df,
+            left_on='工單編號',
+            right_on='工單號碼',
+            how='left'
+        )
+
+        # 3. 移除多餘欄位
+        if '工單號碼' in result_df.columns:
+            result_df = result_df.drop(columns=['工單號碼'])
+
+        # --- 🚀 關鍵修正點：處理空值與 0 ---
+        # 情況 A：如果工單編號本來就是空的，'開工數量' 會自動是 NaN (顯示為空)
+        # 情況 B：如果工單編號有值但 order_df 找不到，'開工數量' 也會是 NaN
+        # 如果你希望「有編號但找不到」顯示 0，「沒編號」顯示空，可以這樣寫：
+        
+        mask_has_wo = result_df['工單編號'].notna() & (result_df['工單編號'] != '')
+        mask_no_qty = result_df['開工數量'].isna()
+        
+        # 只有「有工單編號」且「沒抓到數量」的才補 0，完全沒編號的就維持 NaN (留空)
+        result_df.loc[mask_has_wo & mask_no_qty, '開工數量'] = 0
+
+        cols_to_drop = ["預計開工日_tmp"]
+        result_df = result_df.drop(columns=[c for c in cols_to_drop if c in result_df.columns])
+
+        # B. 重新排序欄位邏輯
+        cols = [c for c in result_df.columns.tolist()]
+        
+        # 定義移動函數：將某欄位搬到指定索引 (0-based)
+        def move_col(column_list, col_name, to_idx):
+            if col_name in column_list:
+                column_list.insert(to_idx, column_list.pop(column_list.index(col_name)))
+            return column_list
+
+        cols = move_col(cols, "預計開工日", 2)
+        
+        cols = move_col(cols, "預計入庫日", 13)
+
+        cols = move_col(cols, "開工數量", 6)
+
+        result_df = result_df[cols]
+        return result_df
+    
+    A830_df = merge_qty(A830_df)
+    B201_df = merge_qty(B201_df)
+    A159_df = merge_qty(A159_df)
+
+
+    return A830_df, B201_df, A159_df
+
+
 def remaining_paired_detail(df_paired_split, remaining, base_df):
 
     df_paired_split = df_paired_split.copy()
@@ -5839,10 +5936,10 @@ def main():
     # === 插入步驟：將 sorted_df_end 寫入 Excel 作為 AI 輸入 ===
     # ========================================================================
     # 命名 AI 輸入檔案
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # 取得目前.py檔的資料夾
+    data_folder = "data"
     today = datetime.now().strftime("%Y%m%d")
-    # 使用一個臨時名稱作為 AI 的輸入檔，例如加上 _AI_INPUT
-    ai_input_name = os.path.join(script_dir, f"ribbon_schedule_{today}_AI_INPUT.xlsx")
+    ai_input_name = os.path.join(script_dir, data_folder, f"ribbon_month_{today}_AI_INPUT.xlsx")
     optimized_output_name = ai_input_name.replace("_AI_INPUT", "_ML_RESULT")
     final_output_path = ai_input_name # 預設使用 AI 輸入檔的 DataFrame
 
@@ -5947,6 +6044,9 @@ def main():
 
     result_check = check_Qty(A830_new, B201_new, A159_new)
     print(result_check)
+
+    #加入開工數量
+    A830_new, B201_new, A159_new = Erin_use3(A830_new, B201_new, A159_new)
     
     A830_new, B201_new, A159_new = check_initated(A830_new, B201_new, A159_new, df_history)
 
@@ -6101,8 +6201,9 @@ def main():
 
 
     script_dir = os.path.dirname(os.path.abspath(__file__))  # 取得目前.py檔的資料夾
+    data_folder = "data"
     today = datetime.now().strftime("%Y%m%d%H%M")
-    output_name = os.path.join(script_dir, f"ribbon_schedule_{today}.xlsx")   # 存到同一層資料夾
+    output_name = os.path.join(script_dir, data_folder, f"ribbon_schedule_{today}.xlsx")  # 存到同一層資料夾
     if os.path.exists(output_name):
         try:
             os.remove(output_name)

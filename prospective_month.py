@@ -1834,7 +1834,7 @@ def choose_date(df: pd.DataFrame) -> pd.DataFrame:
     global start_date, end_date, break_date_list, schedule_start_date
 
     df = df.copy()
-    df["日期篩選用"] = pd.to_datetime(df["開工日期"], errors="coerce")
+    df["日期篩選用"] = pd.to_datetime(df["客戶需求日期"], errors="coerce")
 
     # ✅ 若使用者未選擇日期就關閉，直接中止
     if not start_date and not end_date:
