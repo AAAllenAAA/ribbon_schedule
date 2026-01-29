@@ -1,7 +1,7 @@
 <?php
 // db_config.php
 
-$json_path = "E:/ribbon_schedule/config_ribbon.json";
+$json_path = "D:/ribbon_schedule/config_ribbon.json";
 
 if (!file_exists($json_path)) {
     die("❌ 找不到資料庫設定檔 (JSON)");

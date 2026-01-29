@@ -1,5 +1,5 @@
 <?php
-$baseDir = "E:/ribbon_schedule/";  // 你的 Excel 檔案放置位置
+$baseDir = "D:/ribbon_schedule/data/";  // 你的 Excel 檔案放置位置
 
 if (!isset($_GET['file'])) {
     die("沒有指定下載檔案");
@@ -11,7 +11,6 @@ $filePath = $baseDir . $file;
 if (!file_exists($filePath)) {
     die("找不到檔案：$filePath");
 }
-
 
 // --- 強制停用快取 ---
 header("Cache-Control: no-cache, must-revalidate"); 

@@ -116,8 +116,8 @@
 
         if (isset($_POST['submit'])) {
             // 1. 設定存檔與讀取路徑
-            $uploadDir = "E:/ribbon_schedule/test_report_upload/";
-            $uploadDir_json = "E:/ribbon_schedule/test_report_upload/json/";
+            $uploadDir = "D:/ribbon_schedule/test_report_upload/";
+            $uploadDir_json = "D:/ribbon_schedule/test_report_upload/json/";
 
             if (!is_dir($uploadDir))
                 mkdir($uploadDir, 0777, true);
@@ -221,8 +221,8 @@
                     $data['end_range'] = cleanDate($_POST['end_range']) ?? $startDateStr;
                 } else {
                     // --- 當日模式 (daily)：自動計算前後 20 個工作天 ---
-                    $data['start_range'] = addBusinessDays($startDateStr, -30);
-                    $data['end_range'] = addBusinessDays($startDateStr, 30);
+                    $data['start_range'] = addBusinessDays($startDateStr, -20);
+                    $data['end_range'] = addBusinessDays($startDateStr, 20);
                 }
 
                 // A. 寫入 JSON 設定檔
@@ -231,8 +231,8 @@
 
                 // B. 執行 Python 程式
                 $pythonScript = ($data['run_mode'] == 'daily')
-                    ? "E:/ribbon_schedule/schedule_web_v4.py"
-                    : "E:/ribbon_schedule/prospective_month.py";
+                    ? "D:/ribbon_schedule/schedule_web_v4.py"
+                    : "D:/ribbon_schedule/prospective_month.py";
 
                 //$resultJsonFile = $uploadDir_json . "result_info.json";
                 $resultJsonFile = ($data['run_mode'] == 'daily')
@@ -258,9 +258,9 @@
                 // 💡 關鍵 3：如果執行失敗 (status 不等於 0)，顯示錯誤內容
                 if ($return_var !== 0) {
                     echo "<h2>❌ 排程執行失敗！</h2>";
-                    echo "<p>錯誤代碼 (Status): $return_var</p>";
+                    //echo "<p>錯誤代碼 (Status): $return_var</p>";
                     echo "<pre style='background: #000; color: #adff2f; padding: 20px; border-radius: 5px;'>";
-                    echo "執行指令: $cmd\n";
+                    //echo "執行指令: $cmd\n";
                     echo "----------------------------------------\n";
                     if (empty($output)) {
                         echo "完全沒有輸出訊息。請檢查：\n";
@@ -271,7 +271,7 @@
                         echo implode("\n", $output);
                     }
                     echo "</pre>";
-                    exit; // 停止執行，不要跳轉，讓你看清楚報錯訊息
+                    //exit; // 停止執行，不要跳轉，讓你看清楚報錯訊息
                 }
 
                 // C. 【關鍵】立刻讀取 Python 產出的結果到 PHP 變數

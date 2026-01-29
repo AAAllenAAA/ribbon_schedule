@@ -8,7 +8,7 @@ $action = $_POST['action'] ?? '';
 
 function writeTextLog($action, $main_p, $details, $user_ID)
 {
-    $logPath = 'E:\ribbon_schedule\data\data_adjust';
+    $logPath = 'D:\ribbon_schedule\data\data_adjust';
     $logFile = $logPath . '\mapping_change_log.txt';
 
     if (!is_dir($logPath)) {
@@ -31,23 +31,21 @@ if ($action == 'move_top') {
     $stmt->bind_param("ss", $main_p, $sub_p);
     $stmt->execute();
 
-    // 2. 【核心修正】將初始化變數與更新合併為一條指令
-    // 利用 (SELECT @i:=0) 作為臨時表來初始化變數，確保在同一個 query 內完成
+    // 2. 【核心修正】分兩步執行重新編號
+    $conn->query("SET @i := 0"); // 第一步：初始化變數
     $shuffle_sql = "
-        UPDATE pairingrules, (SELECT @i:=0) AS temp 
-        SET sort_num = (@i:=@i+1) 
-        ORDER BY main_ProductInfo ASC, sort_num ASC 
-    ";
+        UPDATE pairingrules 
+        SET sort_num = (@i := @i + 1) 
+        ORDER BY main_ProductInfo ASC, sort_num ASC
+    "; // 第二步：單表更新 (此時允許 ORDER BY)
     $conn->query($shuffle_sql);
 
     // 3. 強迫物理重排
     $conn->query("ALTER TABLE pairingrules ORDER BY sort_num ASC");
 
     $log_details = "執行置頂操作：將子料號 [$sub_p] 移至主料號 [$main_p] 的第一順位";
-
     writeTextLog("MOVE_TOP", $main_p, $log_details, $user_ID);
 
-    //header("Location: adjust_mapping.php?status=success&msg=已將 $main_p 置頂");
     echo "success";
     exit();
 }
@@ -164,9 +162,10 @@ if ($action == 'add') {
     $stmt_ins->execute();
 
     // --- 步驟 3: 重新洗牌 (確保新加入的 0 變為 1) ---
+    $conn->query("SET @i := 0"); // 初始化
     $shuffle_sql = "
-        UPDATE pairingrules, (SELECT @i:=0) AS temp 
-        SET sort_num = (@i:=@i+1) 
+        UPDATE pairingrules 
+        SET sort_num = (@i := @i + 1) 
         ORDER BY main_ProductInfo ASC, sort_num ASC
     ";
 

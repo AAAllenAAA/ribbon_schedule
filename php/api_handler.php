@@ -2,8 +2,11 @@
 // api_handler.php
 header("Content-Type: application/json; charset=UTF-8");
 
-require_once 'E:\XAMPP\htdocs\csv-to-mysql\lib\WorkOrder_Allen.php'; 
+// 1. 引入類別檔案
+require_once '..\csv-to-mysql\lib\WorkOrder_Allen.php'; 
 
+// 2. 因為有 Namespace，必須使用完整類別名稱或宣告 use
+// 假設您的 WorkOrder.php 第一行是 namespace Phppot;
 $db = new \Phppot\WorkOrder(); 
 
 $action = $_POST['action'] ?? '';
@@ -11,7 +14,7 @@ $filename = $_POST['filename'] ?? '';
 
 if ($action === 'process_csv' && !empty($filename)) {
     // 定義 Python 產出 CSV 的物理路徑
-    $uploadDir = "E:/ribbon_schedule/";
+    $uploadDir = "D:/ribbon_schedule/data/";
     $fullPath = $uploadDir . $filename;
 
     // 檢查實體檔案是否存在
