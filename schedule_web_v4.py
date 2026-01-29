@@ -9,6 +9,7 @@ import os
 import platform
 import subprocess
 import sys
+import io
 import unicodedata
 import json
 import math
@@ -26,8 +27,13 @@ import warnings
 import builtins
 import mysql.connector
 warnings.filterwarnings("ignore", category=UserWarning)
+# 隱藏所有的 FutureWarning 和 DeprecationWarning
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=DeprecationWarning)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, week_81B_user
+global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, completion_map
 
 
 GLOBAL_ORDER_QTY_MAP = {}  # {工單號碼: 剩餘開工數量}
@@ -105,9 +111,6 @@ def load_schedule_history(config: Dict[str, Any]) -> pd.DataFrame:
 
 
 def get_holiday_multiplier_map(holiday_list):
-    """
-    只針對 holiday_list 中出現過的日期計算產能權重
-    """
     if not holiday_list:
         return {}
 
@@ -115,10 +118,17 @@ def get_holiday_multiplier_map(holiday_list):
     work_intervals = [(time(8, 0), time(12, 0)), (time(13, 0), time(17, 0))]
     total_work_minutes = 480.0
     
-    # 1. 先找出清單中所有的日期（不重複）
+    # 1. 找出所有受影響的日期（包含跨日的中間日期）
     unique_dates = set()
     for period in holiday_list:
-        unique_dates.add(datetime.fromisoformat(period['start']).date())
+        start_d = datetime.fromisoformat(period['start']).date()
+        end_d = datetime.fromisoformat(period['end']).date()
+        
+        # 💡 關鍵：用迴圈把開始到結束的每一天都加進去
+        curr = start_d
+        while curr <= end_d:
+            unique_dates.add(curr)
+            curr += timedelta(days=1)
     
     # 2. 針對有出現過的日期進行計算
     for curr_date in unique_dates:
@@ -127,18 +137,24 @@ def get_holiday_multiplier_map(holiday_list):
             h_s = datetime.fromisoformat(period['start'])
             h_e = datetime.fromisoformat(period['end'])
             
-            # 日期匹配才計算
-            if h_s.date() == curr_date or h_e.date() == curr_date:
+            # 💡 關鍵修正：判斷「當天」是否與「請假區間」有交集
+            # 只要請假的開始點在當天結束前，且結束點在當天開始後，就有交集
+            day_start = datetime.combine(curr_date, time(0, 0))
+            day_end = datetime.combine(curr_date, time(23, 59, 59))
+            
+            if h_s <= day_end and h_e >= day_start:
                 for w_s_t, w_e_t in work_intervals:
                     w_start = datetime.combine(curr_date, w_s_t)
                     w_end = datetime.combine(curr_date, w_e_t)
                     
+                    # 計算重疊分鐘數
                     overlap_start = max(w_start, h_s)
                     overlap_end = min(w_end, h_e)
                     
                     if overlap_start < overlap_end:
                         off_minutes += (overlap_end - overlap_start).total_seconds() / 60
         
+        # 確保 off_minutes 不會超過 480，算出權重
         mult = max(0.0, (total_work_minutes - off_minutes) / total_work_minutes)
         multiplier_map[curr_date] = round(mult, 2)
             
@@ -148,7 +164,7 @@ def get_holiday_multiplier_map(holiday_list):
 def process_schedule_data():
     # 讓使用者選擇排程資料 Excel
 
-    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, week_81B_user
+    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, completion_map
 
     # 載入json設定
     script_dir = os.path.dirname(os.path.abspath(__file__)) 
@@ -189,8 +205,6 @@ def process_schedule_data():
     }
     schedule_start_date_str = config_user.get("start_date")
     schedule_start_date = datetime.strptime(schedule_start_date_str, "%Y-%m-%d")
-
-    week_81B_user = config_user.get("week_81B_user")
 
     file_path = config_user.get("uploaded_file")
     print(start_date)
@@ -252,6 +266,7 @@ def process_schedule_data():
     df_history = load_schedule_history(config)
 
     # --- 1. 資料庫同步 ---
+    completion_map = {}
     target_orders = df['工單號碼'].unique().tolist()
     if target_orders:
         orders_placeholder = "('" + "','".join(map(str, target_orders)) + "')"
@@ -298,6 +313,10 @@ def process_schedule_data():
             df['庫存完工量'] = pd.to_numeric(df['庫存完工量'], errors='coerce').fillna(0)
             df['額外調整量'] = pd.to_numeric(df['額外調整量'], errors='coerce').fillna(0)
             df['開工數量'] = (pd.to_numeric(df['開工數量'], errors='coerce').fillna(0) - (df['庫存完工量'] + df['額外調整量'])).clip(lower=0)
+            df['庫存完工量'] = pd.to_numeric(df['庫存完工量'], errors='coerce').fillna(0)
+            df['額外調整量'] = pd.to_numeric(df['額外調整量'], errors='coerce').fillna(0)
+            df['完工數量'] = (df['庫存完工量'] + df['額外調整量']).clip(lower=0)
+            completion_map = dict(zip(df['工單號碼'], df['完工數量']))
 
         except Exception as e:
             print(f"❌ 資料庫同步失敗: {e}")
@@ -765,7 +784,7 @@ def process_schedule_data():
     def format_df(df):
         if not isinstance(df, pd.DataFrame) or df.empty:
             return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "餘量",
-                                         "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日"])
+                                         "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日", "完工數量"])
         df = df.copy()
         df.rename(columns={
             "開工日期": "預計開工日",
@@ -776,7 +795,7 @@ def process_schedule_data():
             "寬度Cm": "公分",
             "客戶需求日期": "客戶需求日"
         }, inplace=True)
-        for col in ["公分", "預估良品數", "車數", "刀次"]:
+        for col in ["公分", "預估良品數", "車數", "刀次", "完工數量"]:
             if col in df.columns and isinstance(df[col], pd.Series):
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
             elif col not in df.columns:
@@ -788,7 +807,7 @@ def process_schedule_data():
 
 
         return df[["預計開工日", "人員", "工單編號", "品號", "餘量",
-                   "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日"]]
+                   "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日", "完工數量"]]
 
     remaining_df = format_df(remaining_df)
     no_pair_df = format_df(no_pair_df)
@@ -3241,7 +3260,7 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
     修正邏輯：每次補刀時即時計算當日品號種類數與新上限，避免超過限制。
     """
 
-    MAX_KNIFE_MAP = {1:65, 2:55, 3:51, 4:47, 5:43, 6:39}
+    MAX_KNIFE_MAP = {1:60, 2:55, 3:51, 4:47, 5:43, 6:39}
     prefix_rules = {"B110":5, "TTR":4, "UTMX":4, "UTM":3}
     default_prefix_len = 3
 
@@ -3619,6 +3638,8 @@ def Erin_use2(A830_df, B201_df, A159_df, holiday_maps):
 
 
 def Erin_use3(A830_df, B201_df, A159_df):
+    
+    global completion_map
 
     script_dir = os.path.dirname(os.path.abspath(__file__)) 
     user_path = os.path.join(script_dir, "E:/ribbon_schedule/test_report_upload/json/config_data.json")
@@ -3675,6 +3696,10 @@ def Erin_use3(A830_df, B201_df, A159_df):
         if '工單號碼' in result_df.columns:
             result_df = result_df.drop(columns=['工單號碼'])
 
+        print(completion_map)
+        wo_keys = result_df['工單編號'].astype(str).str.strip()
+        result_df['完工數量'] = wo_keys.map(completion_map).fillna(0)
+
         # --- 🚀 關鍵修正點：處理空值與 0 ---
         # 情況 A：如果工單編號本來就是空的，'開工數量' 會自動是 NaN (顯示為空)
         # 情況 B：如果工單編號有值但 order_df 找不到，'開工數量' 也會是 NaN
@@ -3703,6 +3728,8 @@ def Erin_use3(A830_df, B201_df, A159_df):
         cols = move_col(cols, "預計入庫日", 13)
 
         cols = move_col(cols, "開工數量", 6)
+
+        cols = move_col(cols, "完工數量", 7)
 
         result_df = result_df[cols]
         return result_df
@@ -3872,34 +3899,50 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
 
 
 def check_Qty(A830_part_end, B201_part_end, A159_part_end):
-
     try:
         if "GLOBAL_ORDER_QTY_MAP" not in globals():
             print("⚠️ 找不到 GLOBAL_ORDER_QTY_MAP，略過防呆檢查。")
-            return False
+            return True # 或者根據需求決定是否拋錯
 
-        # 合併三個人員的資料
+        # 合併三位人員的資料
         all_staff_df = pd.concat([A830_part_end, B201_part_end, A159_part_end], ignore_index=True)
 
-        # 確保數值欄位是數字
+        # 確保數值欄位正確
         all_staff_df["餘量"] = pd.to_numeric(all_staff_df.get("餘量", 0), errors="coerce").fillna(0)
 
         # 檢查每個工單是否滿足計畫數量
         for order_id, planned_qty in GLOBAL_ORDER_QTY_MAP.items():
             planned_qty = float(planned_qty)
+            # 找出該工單對應的所有行，並加總餘量
             total_actual = all_staff_df.loc[all_staff_df["工單編號"] == order_id, "餘量"].sum()
+            product_series = all_staff_df.loc[all_staff_df["工單編號"] == order_id, "品號"]
+            product_id = product_series.unique()[0] if not product_series.empty else "未知品號"
 
             if total_actual < planned_qty:
-                print(f"⚠️ 工單 {order_id} 開工數量 {planned_qty:.0f}，實際加總僅 {total_actual:.0f}（差 {planned_qty - total_actual:.0f}）")
-                return False
+                diff = planned_qty - total_actual
+                # 這裡就是關鍵：把要給網頁看的訊息組好
+                error_msg = (f"❌ 數量不足報錯\n"
+                             f"----------------------------------------\n"
+                             f"工單【{order_id}】計畫數量為 {planned_qty:.0f}，但實際分配僅 {total_actual:.0f} (缺少 {diff:.0f})。\n"
+                             f"💡 請確認此工單【{order_id}】之品號是否有基本資料 或 其他設定上有問題!!"
+                             )
+                
+                # 💡 重點 1：使用你備份的 real_print，繞過 block_print
+                real_print(error_msg)
+                
+                # 💡 重點 2：直接離開，不要 raise，這樣就不會有 Traceback
+                sys.exit(1)
 
-        # 所有工單都沒缺少
+        print("✅ 數量防呆檢查通過！")
         return True
 
+    except SystemExit:
+        # 這是為了讓 sys.exit(1) 順利執行，不被後面的 Exception 攔截
+        sys.exit(1)
     except Exception as e:
-        print(f"❌ 防呆檢查時發生錯誤：{e}")
-        return False
-
+        # 系統級報錯也用 real_print 輸出乾淨字串
+        real_print(f"❌ 防呆檢查時發生系統錯誤：{e}")
+        sys.exit(1)
 
 
 def check_df_paired_split_2(df_paired, extra_remaining, base_df):
@@ -5345,7 +5388,7 @@ def rebalance_after_rotation(df_A830, df_B201, df_A159, holiday_multiplier_maps,
     prefix_rules = {"B110": 5, "TTR": 4, "UTMX": 4, "UTM": 3}
     week_idx = (start_dt - reference_date).days // 7
     standby_person = rotation_order[week_idx % 3]
-    MAX_KNIFE_TABLE = {1:65, 2:55, 3:51, 4:47, 5:43, 6:39}
+    MAX_KNIFE_TABLE = {1:60, 2:55, 3:51, 4:47, 5:43, 6:39}
 
     # 計算下週一 (用於值班生退回補位單)
     next_monday = (start_dt + timedelta(days=(7 - start_dt.weekday()))).date()
@@ -5534,7 +5577,7 @@ def rebalance_after_rotation(df_A830, df_B201, df_A159, holiday_multiplier_maps,
 
 def fill_standby_capacity_with_limit(df_A830, df_B201, df_A159, holiday_maps):
     # 標準上限地圖（全勤時）
-    MAX_KNIFE_MAP = {1:65, 2:55, 3:51, 4:47, 5:43, 6:39}
+    MAX_KNIFE_MAP = {1:60, 2:55, 3:51, 4:47, 5:43, 6:39}
     rotation_order = ["B201", "A830", "A159"]
     reference_date = pd.Timestamp('2024-12-30')
     prefix_rules = {"B110": 5, "TTR": 4, "UTMX": 4, "UTM": 3}
@@ -5835,7 +5878,7 @@ def check_initated(A830_new, B201_new, A159_new, df_history):
 
 def main():
 
-    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, week_81B_user
+    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, completion_map
 
     # 初階段工單分類 (輸入開始結束日期，根據config找到基本資料)
     result = process_schedule_data()  
