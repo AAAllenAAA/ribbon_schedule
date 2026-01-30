@@ -48,7 +48,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-#print = block_print
+print = block_print
 
 def update_global_order_qty_map(df):
     """
