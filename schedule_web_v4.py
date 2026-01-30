@@ -48,7 +48,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-print = block_print
+#print = block_print
 
 def update_global_order_qty_map(df):
     """
@@ -5891,6 +5891,7 @@ def main():
     df_68 = result["paired_df_68"]
     df_d1 = result["paired_df_d1"]
     base_df = result["base_df"]
+
 
     
     # 無須配對的工單進行分組尚未排程

@@ -8,5 +8,17 @@
         "password": "unitech",
         "database": "ribbon_test"
     },
-    "capacity_percent": 33605
+    "capacity_percent": 33607,
+    "jan": 33605,
+    "Feb": 33607,
+    "Mar": 33605,
+    "Apr": 33605,
+    "May": 33605,
+    "Jun": 33605,
+    "Jui": 33609,
+    "Aug": 33605,
+    "Sep": 33605,
+    "Oct": 33605,
+    "Nov": 33605,
+    "Dec": 33605
 }
