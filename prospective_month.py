@@ -35,6 +35,8 @@ import re
 import traceback
 import numpy as np
 import pandas as pd
+import win32com.client
+import pythoncom
 from typing import List, Dict, Any, Tuple
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -69,6 +71,59 @@ real_print = print
 
 # 全部 print 暫時關閉
 print = block_print
+
+def universal_excel_loader(file_path):
+    # 1. 取得絕對路徑（Excel COM 元件要求必須是絕對路徑）
+    abs_path = os.path.abspath(file_path)
+    print(f"--- 開始處理檔案: {abs_path} ---")
+
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(f"找不到檔案: {abs_path}")
+
+    # 2. 強制執行轉檔 (不管它是 .xls 還是什麼，只要是 Excel 檔案就轉)
+    try:
+        print("正在啟動背景 Excel 進行強制修復與轉檔...")
+        # 初始化 COM 庫
+        pythoncom.CoInitialize()
+        
+        # DispatchEx 會啟動一個全新的 Excel 進程
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        
+        # 開啟檔案
+        wb = excel.Workbooks.Open(abs_path)
+        
+        # 另存為 .xlsx (格式代碼 51)
+        temp_xlsx = os.path.splitext(abs_path)[0] + "_fixed.xlsx"
+        if os.path.exists(temp_xlsx):
+            os.remove(temp_xlsx)
+            
+        wb.SaveAs(temp_xlsx, FileFormat=51)
+        wb.Close()
+        excel.Quit()
+        
+        # 3. 使用 Pandas 讀取轉完的檔案
+        df = pd.read_excel(temp_xlsx, engine='openpyxl', dtype=str)
+        
+        # 刪除暫存檔
+        os.remove(temp_xlsx)
+        print("✅ 強制修復轉檔成功！")
+
+        return df
+
+    except Exception as e:
+        print(f"❌ 強制轉檔過程中發生嚴重錯誤: {str(e)}")
+        # 萬一失敗，最後的掙扎：嘗試原生讀取
+        try:
+            print("嘗試最後的備援讀取...")
+            return pd.read_excel(abs_path, dtype=str)
+        except Exception as last_e:
+            raise Exception(f"所有方法皆失敗。Excel 報錯: {e} | Pandas 報錯: {last_e}")
+    finally:
+        # 釋放 COM 資源
+        pythoncom.CoUninitialize()
+
 
 def update_global_order_qty_map(df):
     """
@@ -240,7 +295,8 @@ def process_schedule_data():
     base_path = config.get("base_path")
 
     # 讀取資料
-    order_df = pd.read_excel(file_path, dtype=str)
+    #order_df = pd.read_excel(file_path, dtype=str)
+    order_df = universal_excel_loader(file_path)
     #base_df = pd.read_excel(base_path, dtype=str)
 
     # 過濾條件
