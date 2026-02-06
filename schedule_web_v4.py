@@ -6223,7 +6223,19 @@ def main():
     with open(json_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    capacity_percent = config.get("capacity_percent")
+    # 自定義對照表，確保跟 JSON 的 Key 完全對齊
+    month_map = {
+        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"
+    }
+
+    # 取得月份數字 (1~12)
+    month_num = datetime.now().month
+    current_month_key = month_map[month_num]
+
+    # 從 JSON 取得值，並給一個預設值 (例如 100) 以防抓不到
+    capacity_percent = config.get(current_month_key, config.get("capacity_percent", 100))
+
     capacity_percent_each = capacity_percent / 3
     print(capacity_percent_each)
     capacity_A159_achievement = f"{((capacity_daily_A159 / capacity_percent_each) * 100):.2f}%"
