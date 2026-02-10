@@ -396,7 +396,7 @@ def process_schedule_data():
 
     # --- 3. 過濾與清理 (移出歷史資料區塊) ---
     
-    # ⭐ 關鍵：先定義 completed_orders
+    # 先定義 completed_orders
     completed_orders = df[df['開工數量'] <= 0]['工單號碼'].unique().tolist()
 
     # 移除完成工單 (保留剩餘數量 > 0 的)
