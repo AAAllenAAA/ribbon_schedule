@@ -6233,8 +6233,10 @@ def main():
     month_num = datetime.now().month
     current_month_key = month_map[month_num]
 
-    # 從 JSON 取得值，並給一個預設值 (例如 100) 以防抓不到
-    capacity_percent = config.get(current_month_key, config.get("capacity_percent", 100))
+    # 從 JSON 取得值，並給一個預設值以防抓不到 (扁平化的優先權鏈 Priority Chain)
+    #val = config.get(current_month_key) or config.get("capacity_percent") or 100
+    #capacity_percent = val
+    capacity_percent = config.get(current_month_key, config.get("capacity_percent", 100)) #(巢狀預設值 Nested Defaults)
 
     capacity_percent_each = capacity_percent / 3
     print(capacity_percent_each)
