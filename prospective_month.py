@@ -212,7 +212,7 @@ def get_holiday_multiplier_map(holiday_list):
             h_s = datetime.fromisoformat(period['start'])
             h_e = datetime.fromisoformat(period['end'])
             
-            # 💡 關鍵修正：判斷「當天」是否與「請假區間」有交集
+            # 判斷「當天」是否與「請假區間」有交集
             # 只要請假的開始點在當天結束前，且結束點在當天開始後，就有交集
             day_start = datetime.combine(curr_date, time(0, 0))
             day_end = datetime.combine(curr_date, time(23, 59, 59))
