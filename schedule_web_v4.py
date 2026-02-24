@@ -6148,14 +6148,18 @@ def main():
     #加入開工數量
     A830_new, B201_new, A159_new = Erin_use3(A830_new, B201_new, A159_new)
     
-    A830_new, B201_new, A159_new = check_initated(A830_new, B201_new, A159_new, df_history)
-
-
     # ==============================================================================================================
     # === 寫入 Excel ===
     # 1. 準備統計資料 (計算 user_schedule_date 當天的刀次)
     # 將所有人員的 final 結果合併，以便統一計算
-    all_final_combined = pd.concat([A830_new.data, B201_new.data, A159_new.data], ignore_index=True)
+    all_final_combined = pd.concat([A830_new, B201_new, A159_new], ignore_index=True)
+
+    A159_new = A159_new.drop(columns=['唯一主工單ID'], errors='ignore')
+    B201_new = B201_new.drop(columns=['唯一主工單ID'], errors='ignore')
+    A830_new = A830_new.drop(columns=['唯一主工單ID'], errors='ignore')
+
+    # 先drop後才可以渲染
+    A830_new, B201_new, A159_new = check_initated(A830_new, B201_new, A159_new, df_history)
 
     detail_81B = do_newsheet_for_81B(all_final_combined)
     
