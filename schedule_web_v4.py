@@ -22,7 +22,7 @@ import pythoncom
 from typing import List, Dict, Any, Tuple
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import PatternFill, Font
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from datetime import datetime, timedelta, date, time
 from collections import defaultdict
 import warnings
@@ -50,7 +50,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-print = block_print
+#print = block_print
 
 def universal_excel_loader(file_path):
     # 1. 取得絕對路徑（Excel COM 元件要求必須是絕對路徑）
@@ -6162,6 +6162,9 @@ def main():
     A830_new, B201_new, A159_new = check_initated(A830_new, B201_new, A159_new, df_history)
 
     detail_81B = do_newsheet_for_81B(all_final_combined)
+
+    #=================================================================================================================
+    #排程日統計細項
     
     # 確保日期格式一致，並過濾出 user_schedule_date 這天
     # 1. 使用 format='mixed' 讓 Pandas 自動處理橫線與斜線並存的問題
@@ -6422,7 +6425,7 @@ def main():
         B201_new.to_excel(writer, sheet_name="旺斌", index=False)
         A830_new.to_excel(writer, sheet_name="容合", index=False)
 
-        # ⭐ 新增：寫入統計摘要 Sheet
+        #  新增：統計 Sheet
         df_summary.to_excel(writer, sheet_name="排程日統計", index=False)
 
         detail_81B.to_excel(writer, sheet_name="異動通知", index=False)
@@ -6458,6 +6461,24 @@ def main():
         if sheet_name == "排程日統計":
             # 定義亮黃色樣式
             target_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
+            # 定義超連結
+            link_font = Font(bold=True, name="Calibri", color="0000FF", underline="single")
+
+            target_cell_A159 = ws["B10"]
+            target_cell_A159.font = link_font
+            dest_sheet = "家偉" 
+            target_cell_A159.hyperlink = f"#{dest_sheet}!D2"
+
+            target_cell_A830 = ws["B11"]
+            target_cell_A830.font = link_font
+            dest_sheet = "容合" 
+            target_cell_A830.hyperlink = f"#{dest_sheet}!D2"
+
+            target_cell_B201 = ws["B12"]
+            target_cell_B201.font = link_font
+            dest_sheet = "旺斌" 
+            target_cell_B201.hyperlink = f"#{dest_sheet}!D2"
             
             # 直接指定 B5 和 C13 著色
             ws["B5"].fill = target_fill
@@ -6466,6 +6487,35 @@ def main():
             # (選配) 如果想讓這兩格字體加粗，顯得更重要
             ws["B5"].font = Font(bold=True, name="Calibri")
             ws["C13"].font = Font(bold=True, name="Calibri")
+
+            # 建立筆記說明
+            note_row = 15
+
+            ws.merge_cells(f"A{note_row}:C{note_row+12}")
+            note_cell = ws[f"A{note_row}"]
+            note_cell.value = (
+                "1.初階段工單分類(根據database)分成三部分 -> 配對, 不須配對, 剩餘\n"
+                "2.將'剩餘'組做處理，確認database中可搭配的料號後去'不須配對'組中尋找是否有可搭切的工單若無可搭配的料號則將工單號碼留空\n"
+                "3.確認目前所有工單的數量是否有缺少\n"
+                "4.將全部工單進行排序 依照 -> (1)滿足交期, (2)同公分且同原料, (3)同公分, (4)同原料 之優先級\n"
+                "5.輸入休假區間及開始時間\n"
+                "6.輸入歷史資料 -> 優先做前一日尚未完工的工單\n"
+                "7.分配工單給三位人員 -> 依照周輪流做81B工單\n"
+                "8.ML模型進行排序優化，同樣遵循(1)滿足交期, (2)同公分且同原料, (3)同公分, (4)同原料\n"
+                "9.根據刀次table補滿每日可達成的刀次\n"
+                "10.補上'米平方', '週分組', '預計入庫日', '開工數量'\n"
+                "11.最後防呆確保工單的數量是否有缺少"
+            )
+
+            # 設定文字格式：靠上對齊 + 自動換行
+            note_cell.alignment = Alignment(wrap_text=True, vertical="top")
+            note_cell.font = Font(size=10, name="微軟正黑體")
+
+            # 為整個筆記框加上邊框 (選配)
+            thin = Side(border_style="thin", color="000000")
+            for row in ws[f"A{note_row}:C{note_row+10}"]:
+                for cell in row:
+                    cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
 
     wb.save(output_name)  
 
