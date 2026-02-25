@@ -512,7 +512,8 @@ def process_schedule_data():
     # 準備 remaining_by_item：料號 -> list of rows（此為配對池）
     remaining_by_item = {}
     for _, row in remaining_df.iterrows():
-        remaining_by_item.setdefault(row["料號"], []).append(row)
+        if not str(row["工單號碼"]).startswith("81B"):
+            remaining_by_item.setdefault(row["料號"], []).append(row)
 
     # 建構 candidates：主料號 -> list of candidate dicts（每筆 base_df 的一列為一個 candidate）
     # candidate structure: { "child_codes": [...], "child_out_cars": [...], "source_row": base_row }
@@ -554,6 +555,9 @@ def process_schedule_data():
     for main_order in rem_rows:
         main_order_id = main_order["工單號碼"]
         main_item_code = main_order["料號"]
+
+        if str(main_order_id).startswith("81B"):
+            continue
 
         # 若主工單已被其他配對使用，跳過
         if main_order_id in used_order_ids:
@@ -2590,6 +2594,9 @@ def final_doAssignAndSort_DEBUG(df_paired_split, df_no_pair_split, df_no_pair_se
         original_item = row["品號"]
         original_qty_val = pd.to_numeric(row["預估良品數"], errors="coerce") if not pd.isna(row["預估良品數"]) else 0
         sn = row["工單編號"]
+        #1修正點#
+        if str(sn).strip().upper().startswith("81B"):
+            continue
         original_order = row.copy()
         
         main_car_count = pd.to_numeric(original_order.get("車數", 1), errors="coerce") or 1
@@ -2633,8 +2640,23 @@ def final_doAssignAndSort_DEBUG(df_paired_split, df_no_pair_split, df_no_pair_se
                     match_in_df = df_src_ref[df_src_ref["品號"] == target_code].copy()
                     if match_in_df.empty: continue
                         
+                    #2修正點#
+                    match_in_df = df_src_ref[
+                        (df_src_ref["品號"] == target_code) & 
+                        (~df_src_ref["工單編號"].str.strip().str.upper().str.startswith("81B"))
+                    ].copy()
+                        
+                    # ❗ 重要：過濾完後立刻檢查是否為空
+                    if match_in_df.empty:
+                        continue
+                        
+                    # 排序
                     match_in_df["預計開工日"] = pd.to_datetime(match_in_df["預計開工日"], errors='coerce')
                     match_in_df = match_in_df.sort_values(by="預計開工日", ascending=True)
+
+                    # ❗ 再次檢查（安全保險），避免 iloc[0] 崩潰
+                    if len(match_in_df) == 0:
+                        continue
 
                     paired_row = match_in_df.iloc[0].copy()
                     original_paired_index = paired_row.name 
@@ -3999,7 +4021,8 @@ def check_df_paired_split_2(df_paired, extra_remaining, base_df):
     # 1. 建立配對查找字典
     remaining_by_item = {}
     for _, row in remaining_df.iterrows():
-        remaining_by_item.setdefault(row["品號"], []).append(row.to_dict())
+        if not str(row["工單編號"]).startswith("81B"):
+            remaining_by_item.setdefault(row["品號"], []).append(row.to_dict())
 
     # 2. 準備 base_df 映射
     base_df_map = base_df.drop_duplicates(subset=['料號'], keep='first').set_index('料號')
@@ -4011,6 +4034,9 @@ def check_df_paired_split_2(df_paired, extra_remaining, base_df):
         main_order_id = main_order["工單編號"]
         main_item_code = main_order["品號"]
         
+        if str(main_order_id).startswith("81B"):
+            continue
+
         if main_order_id in used_order_ids:
             continue
             
