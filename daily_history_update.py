@@ -30,7 +30,7 @@ def fetch_data_from_db(db_config):
     try:
         today = datetime.date.today()
         today_date = today.strftime('%Y-%m-%d')
-        #today_date = '2026-01-03'
+        #today_date = '2026-0-03'
         print("🟢 嘗試連線資料庫...")
         conn = mysql.connector.connect(**db_config)
         
