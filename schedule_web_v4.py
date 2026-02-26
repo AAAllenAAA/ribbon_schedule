@@ -327,6 +327,7 @@ def process_schedule_data():
         print(orders_placeholder)
         try:
             conn = mysql.connector.connect(**db_config)
+            today_str = datetime.now().strftime('%Y-%m-%d')
             sql_query = f"""
                 SELECT 
                     A.wo_SN AS wo_SN_clean, 
@@ -341,6 +342,7 @@ def process_schedule_data():
                     GROUP BY wo_SN
                 ) B_Sub ON A.wo_SN = B_Sub.wo_SN
                 WHERE A.wo_SN IN {orders_placeholder}
+                AND A.wo_ForceSDate <= '{today_str}'
                 GROUP BY A.wo_SN
             """
             db_df = pd.read_sql(sql_query, conn).fillna(0)
