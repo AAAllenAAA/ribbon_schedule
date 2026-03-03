@@ -330,20 +330,38 @@ def process_schedule_data():
             today_str = datetime.now().strftime('%Y-%m-%d')
             sql_query = f"""
                 SELECT 
-                    A.wo_SN AS wo_SN_clean, 
-                    IFNULL(SUM(A.wo_ForceProNum), 0) as 庫存完工量, 
-                    IFNULL(B_Sub.total_good, 0) as 額外調整量
-                FROM workorder A
-                LEFT JOIN (
-                    SELECT wo_SN, SUM(amount_good) as total_good
-                    FROM packageaction
-                    WHERE action = 'warehouse_bepaired'
-                      AND wo_SN IN {orders_placeholder}
-                    GROUP BY wo_SN
-                ) B_Sub ON A.wo_SN = B_Sub.wo_SN
-                WHERE A.wo_SN IN {orders_placeholder}
-                AND A.wo_ForceSDate <= '{today_str}'
-                GROUP BY A.wo_SN
+                    T.wo_SN_clean,
+                    T.庫存完工量_wo,
+                    T.庫存完工量_pt,
+                    T.裁切不良品,
+                    -- 在外層做判斷，語法乾淨且效能穩定
+                    CASE 
+                        WHEN T.庫存完工量_pt > 0 THEN T.庫存完工量_pt
+                        WHEN T.庫存完工量_wo > 0 THEN T.庫存完工量_wo
+                        ELSE T.原本庫存量
+                    END as 庫存完工量,
+                    T.額外調整量
+                FROM (
+                    -- 內層：先把所有需要的加總算出來
+                    SELECT 
+                        A.wo_SN AS wo_SN_clean, 
+                        SUM(IFNULL(A.wo_pt_good, 0) + IFNULL(A.wo_pt_fail, 0)) as 庫存完工量_wo,
+                        SUM(IFNULL(A.pt_report_good, 0) + IFNULL(A.pt_report_fail, 0)) as 庫存完工量_pt,
+                        IFNULL(SUM(A.wo_ForceProNum), 0) as 原本庫存量,
+                        IFNULL(B_Sub.total_good, 0) as 額外調整量,
+                        IFNULL(A.wo_pt_fail, 0) as 裁切不良品
+                    FROM workorder A
+                    LEFT JOIN (
+                        SELECT wo_SN, SUM(amount_good) as total_good
+                        FROM packageaction
+                        WHERE action = 'warehouse_bepaired'
+                        AND wo_SN IN {orders_placeholder}
+                        GROUP BY wo_SN
+                    ) B_Sub ON A.wo_SN = B_Sub.wo_SN
+                    WHERE A.wo_SN IN {orders_placeholder}
+                    AND A.wo_ForceSDate <= '{today_str}'
+                    GROUP BY A.wo_SN
+                ) AS T
             """
             db_df = pd.read_sql(sql_query, conn).fillna(0)
             conn.close()
@@ -366,11 +384,10 @@ def process_schedule_data():
             df = df.merge(db_df, on='工單號碼', how='left')
 
             # --- 補零與計算 ---
+            df['裁切不良品'] = pd.to_numeric(df['裁切不良品'], errors='coerce').fillna(0)
             df['庫存完工量'] = pd.to_numeric(df['庫存完工量'], errors='coerce').fillna(0)
             df['額外調整量'] = pd.to_numeric(df['額外調整量'], errors='coerce').fillna(0)
             df['開工數量'] = (pd.to_numeric(df['開工數量'], errors='coerce').fillna(0) - (df['庫存完工量'] + df['額外調整量'])).clip(lower=0)
-            df['庫存完工量'] = pd.to_numeric(df['庫存完工量'], errors='coerce').fillna(0)
-            df['額外調整量'] = pd.to_numeric(df['額外調整量'], errors='coerce').fillna(0)
             df['完工數量'] = (df['庫存完工量'] + df['額外調整量']).clip(lower=0)
             completion_map = dict(zip(df['工單號碼'], df['完工數量']))
 
@@ -843,7 +860,7 @@ def process_schedule_data():
     # 格式化函式
     def format_df(df):
         if not isinstance(df, pd.DataFrame) or df.empty:
-            return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "餘量",
+            return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "原料材質", "裁切不良品", "餘量",
                                          "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日", "完工數量"])
         df = df.copy()
         df.rename(columns={
@@ -853,7 +870,7 @@ def process_schedule_data():
             "料號": "品號",
             "開工數量": "預估良品數",
             "寬度Cm": "公分",
-            "客戶需求日期": "客戶需求日"
+            "客戶需求日期": "客戶需求日",
         }, inplace=True)
         for col in ["公分", "預估良品數", "車數", "刀次", "完工數量"]:
             if col in df.columns and isinstance(df[col], pd.Series):
@@ -866,7 +883,7 @@ def process_schedule_data():
         df["餘量"] = df["預估良品數"]
 
 
-        return df[["預計開工日", "人員", "工單編號", "品號", "餘量",
+        return df[["預計開工日", "人員", "工單編號", "品號", "原料材質", "裁切不良品", "餘量",
                    "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日", "完工數量"]]
 
     remaining_df = format_df(remaining_df)
@@ -1400,7 +1417,7 @@ def process_schedule_data_second(order_df, base_df):
 
     # === 9️⃣ 欄位排序 ===
     output_columns = [
-        "預計開工日", "人員", "工單編號", "品號", "餘量",
+        "預計開工日", "人員", "工單編號", "品號", "原料材質", "裁切不良品", "餘量",
         "公分", "車數", "刀次", "預估良品數",
         "預計完工日", "生產註記", "客戶需求日"
     ]
@@ -6362,27 +6379,27 @@ def main():
         #df_68.to_excel(writer, sheet_name="68", index=False)
         #df_d1.to_excel(writer, sheet_name="d1", index=False)
         #df_paired.to_excel(writer, sheet_name="配對", index=False)
-        #df_no_pair.to_excel(writer, sheet_name="不需配對", index=False)
+        #f_no_pair.to_excel(writer, sheet_name="不需配對", index=False)
         #df_remaining_first.to_excel(writer, sheet_name="剩餘工單1", index=False)
 
-        #df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
-        #extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
-        #df_paired_split_2.to_excel(writer, sheet_name="配對後結果2", index=False)
-        #extra_remaining.to_excel(writer, sheet_name="配對後剩餘2", index=False)
-        #df_paired_split_3.to_excel(writer, sheet_name="配對後結果3", index=False)
-        #extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
+        df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
+        extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
+        df_paired_split_2.to_excel(writer, sheet_name="配對後結果2", index=False)
+        extra_remaining.to_excel(writer, sheet_name="配對後剩餘2", index=False)
+        df_paired_split_3.to_excel(writer, sheet_name="配對後結果3", index=False)
+        extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
 
-        #df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
-        #df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
-        #df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
+        df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
+        df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
+        df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
 
-        #df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
-        #remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
+        df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
+        remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
 
-        #df_no_pair_second.to_excel(writer, sheet_name="第二次配對後不需配對", index=False)
-        #df_paired_split_final.to_excel(writer, sheet_name="配對後final", index=False)
-        #remaining_final.to_excel(writer, sheet_name="配對後剩餘final", index=False)
-        #df_no_pair_split.to_excel(writer, sheet_name="不需配對", index=False)
+        df_no_pair_second.to_excel(writer, sheet_name="第二次配對後不需配對", index=False)
+        df_paired_split_final.to_excel(writer, sheet_name="配對後final", index=False)
+        remaining_final.to_excel(writer, sheet_name="配對後剩餘final", index=False)
+        df_no_pair_split.to_excel(writer, sheet_name="不需配對", index=False)
 
         #debug.to_excel(writer, sheet_name="doassignandsort_debug", index=False)
         #final_remaining.to_excel(writer, sheet_name="最後剩餘", index=False)
@@ -6400,7 +6417,7 @@ def main():
 
         #sorted_df_end_list_his.to_excel(writer, sheet_name="排列結果+his", index=False)
 
-        #sorted_df_end.to_excel(writer, sheet_name="排列結果+人員", index=False)
+        sorted_df_end.to_excel(writer, sheet_name="排列結果+人員", index=False)
         '''
         if debug_log: # 確保字典不是空的
             # 1. 將字典轉換為 DataFrame (orient='index' 將 ID 作為索引)
@@ -6436,15 +6453,15 @@ def main():
         #A830_part_end.to_excel(writer, sheet_name="容合_final", index=False)
 
         #_apply, _fill
-        #A159_new_apply.to_excel(writer, sheet_name="家偉_apply", index=False)
-        #B201_new_apply.to_excel(writer, sheet_name="旺斌_apply", index=False)
-        #A830_new_apply.to_excel(writer, sheet_name="容合_apply", index=False)
-        #A159_new_fill.to_excel(writer, sheet_name="家偉_fill", index=False)
-        #B201_new_fill.to_excel(writer, sheet_name="旺斌_fill", index=False)
-        #A830_new_fill.to_excel(writer, sheet_name="容合_fill", index=False)
-        #A159_new_rebalance.to_excel(writer, sheet_name="家偉_rebalance", index=False)
-        #B201_new_rebalance.to_excel(writer, sheet_name="旺斌_rebalance", index=False)
-        #A830_new_rebalance.to_excel(writer, sheet_name="容合_rebalance", index=False)
+        A159_new_apply.to_excel(writer, sheet_name="家偉_apply", index=False)
+        B201_new_apply.to_excel(writer, sheet_name="旺斌_apply", index=False)
+        A830_new_apply.to_excel(writer, sheet_name="容合_apply", index=False)
+        A159_new_fill.to_excel(writer, sheet_name="家偉_fill", index=False)
+        B201_new_fill.to_excel(writer, sheet_name="旺斌_fill", index=False)
+        A830_new_fill.to_excel(writer, sheet_name="容合_fill", index=False)
+        A159_new_rebalance.to_excel(writer, sheet_name="家偉_rebalance", index=False)
+        B201_new_rebalance.to_excel(writer, sheet_name="旺斌_rebalance", index=False)
+        A830_new_rebalance.to_excel(writer, sheet_name="容合_rebalance", index=False)
 
         # A830_new, B201_new, A159_new
         A159_new.to_excel(writer, sheet_name="家偉", index=False)
