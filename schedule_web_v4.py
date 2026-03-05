@@ -3818,11 +3818,11 @@ def Erin_use3(A830_df, B201_df, A159_df):
 
         cols = move_col(cols, "預計開工日", 2)
         
-        cols = move_col(cols, "預計入庫日", 13)
+        cols = move_col(cols, "預計入庫日", 15)
 
-        cols = move_col(cols, "開工數量", 6)
+        cols = move_col(cols, "開工數量", 7)
 
-        cols = move_col(cols, "完工數量", 7)
+        cols = move_col(cols, "完工數量", 8)
 
         result_df = result_df[cols]
         return result_df
@@ -4547,10 +4547,10 @@ def schedule_history_download(part_end_list, history):
 
 def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] = None) -> Tuple[pd.DataFrame, Dict]:
     """
-    【專職切割版】
     1. 81B 強制專任：唯一主工單ID 為 81B 開頭 -> A159。
     2. 81A 與其他強制分配：非 81B 的所有工單 -> 由 A830, B201 依相似性與負荷平分。
     3. 排除 A159：在自動分配階段，A159 不在候選名單內。
+    4. 排序優先: 同料同公分 > 同料 > 同公分
     """
     
     if personnel_list is None:
@@ -4568,6 +4568,7 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     df_result["預計開工日"] = pd.to_datetime(df_result["預計開工日"], errors='coerce')
     # 沒日期的週數給 W99
     df_result['排程週數'] = df_result['預計開工日'].dt.isocalendar().week.fillna(99).astype(int).apply(lambda x: f"W{x:02d}")
+    df_result['原料材質'] = df_result['原料材質'].fillna('UNKNOWN').astype(str).str.strip()
     
     # 只處理有效 ID
     df_working = df_result[df_result['唯一主工單ID'].ne('') & df_result['唯一主工單ID'].notna()].copy()
@@ -4578,8 +4579,10 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     # ----------------------------------------------------
     def get_group_info(group: pd.DataFrame):
         unique_sizes = sorted(group['尺寸公分'].unique())
+        unique_parts = sorted(group['原料材質'].unique())
         return pd.Series({
             '尺寸指紋': '|'.join(unique_sizes), 
+            '原料材質指紋': '|'.join(unique_parts),
             '群組刀次': group['刀次'].sum(), 
             '排程週數': group['排程週數'].iloc[0]
         })
@@ -4591,7 +4594,7 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     # ----------------------------------------------------
     assigned_groups_map: Dict[str, str] = {} 
     # 初始化負荷計數
-    person_status = {p: {"capacity": 0, "fingerprint": None, "week": None} for p in personnel_list}
+    person_status = {p: {"capacity": 0, "fingerprint": None, "part_fingerprint": None, "week": None} for p in personnel_list}
 
     # --- 第一波：81B 歸 A159 ---
     for _, row in group_info.iterrows():
@@ -4603,13 +4606,17 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
 
     # --- 第二波：其餘所有工單 (不論原本是誰做的) 通通分給 A830 & B201 ---
     to_assign_81A = group_info[~group_info['唯一主工單ID'].isin(assigned_groups_map)].copy()
-    to_assign_81A['聚類鍵'] = to_assign_81A['排程週數'] + '-' + to_assign_81A['尺寸指紋']
-    to_assign_81A.sort_values(by=['聚類鍵', '群組刀次'], ascending=[True, False], inplace=True)
+    #to_assign_81A['聚類鍵'] = to_assign_81A['排程週數'] + '-' + to_assign_81A['尺寸指紋']
+    #to_assign_81A.sort_values(by=['聚類鍵', '群組刀次'], ascending=[True, False], inplace=True)
+
+    to_assign_81A.sort_values(by=['排程週數', '原料材質指紋', '尺寸指紋', '群組刀次'],
+                              ascending=[True, True, True, False], inplace=True)
 
     for _, row in to_assign_81A.iterrows():
         gid = row['唯一主工單ID']
         dose = row['群組刀次']
         current_fp = row['尺寸指紋']
+        current_part_fp = row['原料材質指紋']
         current_wk = row['排程週數']
         
         # ⭐ 候選名單絕對排除 A159，只讓這兩位去分
@@ -4618,11 +4625,18 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
 
         # 相似性匹配
         for p in candidates:
-            if (person_status[p]["fingerprint"] == current_fp and 
-                person_status[p]["week"] == current_wk):
-                best_person = p
-                logic = '相似性匹配'
-                break
+            # 必須是同週
+            if person_status[p]["week"] == current_wk:
+                # 優先權 1 & 2: 同材質優先 (因為 sort 過，同尺寸會連在一起)
+                if person_status[p]["part_fingerprint"] == current_part_fp:
+                    best_person = p
+                    logic = '同材質相似匹配'
+                    break
+                # 優先權 3: 同尺寸 (不同材質)
+                elif person_status[p]["fingerprint"] == current_fp:
+                    best_person = p
+                    logic = '同尺寸相似匹配'
+                    break
         
         # 負荷平衡
         if not best_person:
@@ -4645,7 +4659,7 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     df_result.loc[df_result['人員'].isna(), '人員'] = 'B201' 
 
     # 清理輔助欄位
-    df_result.drop(columns=['尺寸公分', '排程週數'], inplace=True, errors='ignore')
+    df_result.drop(columns=['尺寸公分', '排程週數', '原料材質指紋'], inplace=True, errors='ignore')
 
     print(f"--- 分配完畢 ---")
     print(f"A159 (81B 專員) 總刀次: {person_status['A159']['capacity']}")
@@ -6382,24 +6396,24 @@ def main():
         #f_no_pair.to_excel(writer, sheet_name="不需配對", index=False)
         #df_remaining_first.to_excel(writer, sheet_name="剩餘工單1", index=False)
 
-        df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
-        extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
-        df_paired_split_2.to_excel(writer, sheet_name="配對後結果2", index=False)
-        extra_remaining.to_excel(writer, sheet_name="配對後剩餘2", index=False)
-        df_paired_split_3.to_excel(writer, sheet_name="配對後結果3", index=False)
-        extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
+        #df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
+        #extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
+        #df_paired_split_2.to_excel(writer, sheet_name="配對後結果2", index=False)
+        #extra_remaining.to_excel(writer, sheet_name="配對後剩餘2", index=False)
+        #df_paired_split_3.to_excel(writer, sheet_name="配對後結果3", index=False)
+        #extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
 
-        df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
-        df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
-        df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
+        #df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
+        #df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
+        #df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
 
-        df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
-        remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
+        #df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
+        #remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
 
-        df_no_pair_second.to_excel(writer, sheet_name="第二次配對後不需配對", index=False)
-        df_paired_split_final.to_excel(writer, sheet_name="配對後final", index=False)
-        remaining_final.to_excel(writer, sheet_name="配對後剩餘final", index=False)
-        df_no_pair_split.to_excel(writer, sheet_name="不需配對", index=False)
+        #df_no_pair_second.to_excel(writer, sheet_name="第二次配對後不需配對", index=False)
+        #df_paired_split_final.to_excel(writer, sheet_name="配對後final", index=False)
+        #remaining_final.to_excel(writer, sheet_name="配對後剩餘final", index=False)
+        #df_no_pair_split.to_excel(writer, sheet_name="不需配對", index=False)
 
         #debug.to_excel(writer, sheet_name="doassignandsort_debug", index=False)
         #final_remaining.to_excel(writer, sheet_name="最後剩餘", index=False)
@@ -6430,9 +6444,9 @@ def main():
             debug_df.to_excel(writer, sheet_name="debug_log", index=False)
         '''
         
-        #A159_part.to_excel(writer, sheet_name="家偉_初版", index=False)
-        #B201_part.to_excel(writer, sheet_name="旺斌_初版", index=False)
-        #A830_part.to_excel(writer, sheet_name="容合_初版", index=False)
+        A159_part.to_excel(writer, sheet_name="家偉_初版", index=False)
+        B201_part.to_excel(writer, sheet_name="旺斌_初版", index=False)
+        A830_part.to_excel(writer, sheet_name="容合_初版", index=False)
         
         #A159_part_end_list.to_excel(writer, sheet_name="家偉_merge前", index=False)
         #B201_part_end_list.to_excel(writer, sheet_name="旺斌_merge前", index=False)
@@ -6453,15 +6467,15 @@ def main():
         #A830_part_end.to_excel(writer, sheet_name="容合_final", index=False)
 
         #_apply, _fill
-        A159_new_apply.to_excel(writer, sheet_name="家偉_apply", index=False)
-        B201_new_apply.to_excel(writer, sheet_name="旺斌_apply", index=False)
-        A830_new_apply.to_excel(writer, sheet_name="容合_apply", index=False)
-        A159_new_fill.to_excel(writer, sheet_name="家偉_fill", index=False)
-        B201_new_fill.to_excel(writer, sheet_name="旺斌_fill", index=False)
-        A830_new_fill.to_excel(writer, sheet_name="容合_fill", index=False)
-        A159_new_rebalance.to_excel(writer, sheet_name="家偉_rebalance", index=False)
-        B201_new_rebalance.to_excel(writer, sheet_name="旺斌_rebalance", index=False)
-        A830_new_rebalance.to_excel(writer, sheet_name="容合_rebalance", index=False)
+        #A159_new_apply.to_excel(writer, sheet_name="家偉_apply", index=False)
+        #B201_new_apply.to_excel(writer, sheet_name="旺斌_apply", index=False)
+        #A830_new_apply.to_excel(writer, sheet_name="容合_apply", index=False)
+        #A159_new_fill.to_excel(writer, sheet_name="家偉_fill", index=False)
+        #B201_new_fill.to_excel(writer, sheet_name="旺斌_fill", index=False)
+        #A830_new_fill.to_excel(writer, sheet_name="容合_fill", index=False)
+        #A159_new_rebalance.to_excel(writer, sheet_name="家偉_rebalance", index=False)
+        #B201_new_rebalance.to_excel(writer, sheet_name="旺斌_rebalance", index=False)
+        #A830_new_rebalance.to_excel(writer, sheet_name="容合_rebalance", index=False)
 
         # A830_new, B201_new, A159_new
         A159_new.to_excel(writer, sheet_name="家偉", index=False)
@@ -6540,13 +6554,13 @@ def main():
                 "1.初階段工單分類(根據database)分成三部分 -> 配對, 不須配對, 剩餘\n"
                 "2.將'剩餘'組做處理，確認database中可搭配的料號後去'不須配對'組中尋找是否有可搭切的工單若無可搭配的料號則將工單號碼留空\n"
                 "3.確認目前所有工單的數量是否有缺少\n"
-                "4.將全部工單進行排序 依照 -> (1)滿足交期, (2)同公分且同原料, (3)同公分, (4)同原料 之優先級\n"
+                "4.將全部工單進行排序 依照 -> (1)滿足交期, (2)同公分且同原料, (3)同原料, (4)同公分 之優先級\n"
                 "5.輸入休假區間及開始時間\n"
                 "6.輸入歷史資料 -> 優先做前一日尚未完工的工單\n"
                 "7.分配工單給三位人員 -> 依照周輪流做81B工單\n"
-                "8.ML模型進行排序優化，同樣遵循(1)滿足交期, (2)同公分且同原料, (3)同公分, (4)同原料\n"
+                "8.ML模型進行排序優化，同樣遵循(1)滿足交期, (2)同公分且同原料, (3)同原料, (4)同公分\n"
                 "9.根據刀次table補滿每日可達成的刀次\n"
-                "10.補上'米平方', '週分組', '預計入庫日', '開工數量'\n"
+                "10.補上'米平方', '週分組', '預計入庫日', '開工數量', '不良數', '原料材質'\n"
                 "11.最後防呆確保工單的數量是否有缺少"
             )
 

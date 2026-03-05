@@ -842,7 +842,7 @@ def process_schedule_data():
     # 格式化函式
     def format_df(df):
         if not isinstance(df, pd.DataFrame) or df.empty:
-            return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "餘量",
+            return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "原料材質", "餘量",
                                          "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日"])
         df = df.copy()
         df.rename(columns={
@@ -863,7 +863,7 @@ def process_schedule_data():
             if col not in df.columns:
                 df[col] = ""
         df["餘量"] = df["預估良品數"]
-        return df[["預計開工日", "人員", "工單編號", "品號", "餘量",
+        return df[["預計開工日", "人員", "工單編號", "品號", "原料材質", "餘量",
                    "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日"]]
 
     remaining_df = format_df(remaining_df)
@@ -1398,7 +1398,7 @@ def process_schedule_data_second(order_df, base_df):
 
     # === 9️⃣ 欄位排序 ===
     output_columns = [
-        "預計開工日", "人員", "工單編號", "品號", "餘量",
+        "預計開工日", "人員", "工單編號", "品號", "原料材質", "餘量",
         "公分", "車數", "刀次", "預估良品數",
         "預計完工日", "生產註記", "客戶需求日"
     ]
@@ -4418,10 +4418,10 @@ def schedule_history_download(part_end_list, history):
 
 def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] = None) -> Tuple[pd.DataFrame, Dict]:
     """
-    【專職切割版】
     1. 81B 強制專任：唯一主工單ID 為 81B 開頭 -> A159。
     2. 81A 與其他強制分配：非 81B 的所有工單 -> 由 A830, B201 依相似性與負荷平分。
     3. 排除 A159：在自動分配階段，A159 不在候選名單內。
+    4. 排序優先: 同料同公分 > 同料 > 同公分
     """
     
     if personnel_list is None:
@@ -4439,6 +4439,7 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     df_result["預計開工日"] = pd.to_datetime(df_result["預計開工日"], errors='coerce')
     # 沒日期的週數給 W99
     df_result['排程週數'] = df_result['預計開工日'].dt.isocalendar().week.fillna(99).astype(int).apply(lambda x: f"W{x:02d}")
+    df_result['原料材質'] = df_result['原料材質'].fillna('UNKNOWN').astype(str).str.strip()
     
     # 只處理有效 ID
     df_working = df_result[df_result['唯一主工單ID'].ne('') & df_result['唯一主工單ID'].notna()].copy()
@@ -4449,8 +4450,10 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     # ----------------------------------------------------
     def get_group_info(group: pd.DataFrame):
         unique_sizes = sorted(group['尺寸公分'].unique())
+        unique_parts = sorted(group['原料材質'].unique())
         return pd.Series({
             '尺寸指紋': '|'.join(unique_sizes), 
+            '原料材質指紋': '|'.join(unique_parts),
             '群組刀次': group['刀次'].sum(), 
             '排程週數': group['排程週數'].iloc[0]
         })
@@ -4462,7 +4465,7 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     # ----------------------------------------------------
     assigned_groups_map: Dict[str, str] = {} 
     # 初始化負荷計數
-    person_status = {p: {"capacity": 0, "fingerprint": None, "week": None} for p in personnel_list}
+    person_status = {p: {"capacity": 0, "fingerprint": None, "part_fingerprint": None, "week": None} for p in personnel_list}
 
     # --- 第一波：81B 歸 A159 ---
     for _, row in group_info.iterrows():
@@ -4474,13 +4477,17 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
 
     # --- 第二波：其餘所有工單 (不論原本是誰做的) 通通分給 A830 & B201 ---
     to_assign_81A = group_info[~group_info['唯一主工單ID'].isin(assigned_groups_map)].copy()
-    to_assign_81A['聚類鍵'] = to_assign_81A['排程週數'] + '-' + to_assign_81A['尺寸指紋']
-    to_assign_81A.sort_values(by=['聚類鍵', '群組刀次'], ascending=[True, False], inplace=True)
+    #to_assign_81A['聚類鍵'] = to_assign_81A['排程週數'] + '-' + to_assign_81A['尺寸指紋']
+    #to_assign_81A.sort_values(by=['聚類鍵', '群組刀次'], ascending=[True, False], inplace=True)
+
+    to_assign_81A.sort_values(by=['排程週數', '原料材質指紋', '尺寸指紋', '群組刀次'],
+                              ascending=[True, True, True, False], inplace=True)
 
     for _, row in to_assign_81A.iterrows():
         gid = row['唯一主工單ID']
         dose = row['群組刀次']
         current_fp = row['尺寸指紋']
+        current_part_fp = row['原料材質指紋']
         current_wk = row['排程週數']
         
         # ⭐ 候選名單絕對排除 A159，只讓這兩位去分
@@ -4489,11 +4496,18 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
 
         # 相似性匹配
         for p in candidates:
-            if (person_status[p]["fingerprint"] == current_fp and 
-                person_status[p]["week"] == current_wk):
-                best_person = p
-                logic = '相似性匹配'
-                break
+            # 必須是同週
+            if person_status[p]["week"] == current_wk:
+                # 優先權 1 & 2: 同材質優先 (因為 sort 過，同尺寸會連在一起)
+                if person_status[p]["part_fingerprint"] == current_part_fp:
+                    best_person = p
+                    logic = '同材質相似匹配'
+                    break
+                # 優先權 3: 同尺寸 (不同材質)
+                elif person_status[p]["fingerprint"] == current_fp:
+                    best_person = p
+                    logic = '同尺寸相似匹配'
+                    break
         
         # 負荷平衡
         if not best_person:
@@ -4516,7 +4530,7 @@ def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] =
     df_result.loc[df_result['人員'].isna(), '人員'] = 'B201' 
 
     # 清理輔助欄位
-    df_result.drop(columns=['尺寸公分', '排程週數'], inplace=True, errors='ignore')
+    df_result.drop(columns=['尺寸公分', '排程週數', '原料材質指紋'], inplace=True, errors='ignore')
 
     print(f"--- 分配完畢 ---")
     print(f"A159 (81B 專員) 總刀次: {person_status['A159']['capacity']}")
