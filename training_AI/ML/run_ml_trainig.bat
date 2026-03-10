@@ -2,7 +2,7 @@
 E:
 cd E:\ribbon_schedule\training_AI\ML
 
-:: 設定環境變數，強迫 Python 使用 UTF-8 輸出
+:: 設定環境變數 Python 使用 UTF-8 輸出
 set PYTHONIOENCODING=utf-8
 
 echo [%date% %time%] === Start Monthly Retraining === >> result_log.txt
