@@ -70,7 +70,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-print = block_print
+#print = block_print
 
 def universal_excel_loader(file_path):
     # 1. 取得絕對路徑（Excel COM 元件要求必須是絕對路徑）
@@ -426,6 +426,91 @@ def process_schedule_data():
     print(f"-> 總計 {len(df)} 筆工單進入排程優化。")
     merged = df.copy()
 
+    # ==========================================================
+    #  階段 0: 備註超級優先權 (Remark King Logic)
+    # ==========================================================
+    pair_rows_remark = []
+    used_order_ids = set()
+
+    # 1. 找出所有備註中有工單號碼的資料
+    df_with_remarks = merged[merged["備註"].notna()].copy()
+
+    for _, c_order in df_with_remarks.iterrows():
+        c_id = c_order["工單號碼"]
+        if c_id in used_order_ids: continue
+        
+        raw_remark = str(c_order["備註"]).strip()
+        match = re.search(r"(81[A-Z]\d{5})", raw_remark)
+        
+        if match:
+            pair_order_id = match.group(1)
+            print(f"---")
+            print(f"🚩 發現備註任務：{c_id} 備註寫了 [{raw_remark}] -> 目標 ID: {pair_order_id}")
+            
+            matched_rows = merged[(merged["工單號碼"] == pair_order_id) & (~merged["工單號碼"].isin(used_order_ids))]
+            
+            if not matched_rows.empty:
+                target_order = matched_rows.iloc[0]
+                
+                # 🌟 取得雙方的單一寬度
+                a_width = float(target_order.get("寬度Cm", 0))
+                c_width = float(c_order.get("寬度Cm", 0))
+                print(f"   🔎 進入精確配對(備註)：目標 {pair_order_id}(單寬:{a_width}) 搭配 {c_id}(單寬:{c_width})")
+
+                best_match = None
+                min_diff = 999  # 用來記錄最小誤差
+
+                # 同時測試 88 與 68，尋找誤差最小的組合
+                for target_size in [88, 68]:
+                    for a_cars in range(1, 17):
+                        for c_cars in range(1, 17):
+                            total_cm = (a_width * a_cars) + (c_width * c_cars)
+                            diff = abs(total_cm - target_size)
+                            
+                            # 如果這個組合比之前找過的都更準 (且在 1cm 寬限內)
+                            if diff <= 1 and diff < min_diff:
+                                min_diff = diff
+                                best_match = {
+                                    "a_cars": a_cars,
+                                    "c_cars": c_cars,
+                                    "total": total_cm,
+                                    "target": target_size,
+                                    "diff": diff
+                                }
+                                # 如果已經 0 誤差，就是最完美組合，直接跳出迴圈
+                                if diff == 0: break
+                        if best_match and best_match["diff"] == 0: break
+                    if best_match and best_match["diff"] == 0: break
+
+                # 檢查最後是否有找到符合條件的組合
+                if best_match:
+                    a_cars = best_match["a_cars"]
+                    c_cars = best_match["c_cars"]
+                    
+                    t_copy = target_order.copy()
+                    c_copy = c_order.copy()
+                    
+                    # 更新雙方參數
+                    t_copy["車數"] = a_cars
+                    t_copy["總長度(cm)"] = a_width * a_cars
+                    
+                    c_copy["車數"] = c_cars
+                    c_copy["總長度(cm)"] = c_width * c_cars
+                    c_copy["刀次"] = 0 
+                    
+                    pair_rows_remark.extend([t_copy, c_copy])
+                    used_order_ids.update([c_id, pair_order_id])
+                    
+                    print(f"   ✅ [成功] 最優組合: {pair_order_id}({a_cars}車) + {c_id}({c_cars}車) = {best_match['total']}cm (目標:{best_match['target']}, 誤差:{best_match['diff']:.2f})")
+                else:
+                    print(f"   ❌ [失敗] 1-16 車交叉比對誤差皆 > 1cm")
+                    print(f"      👉 單寬資料：A={a_width} / C={c_width}")
+            else:
+                print(f"   ❓ [找不到] 目標 {pair_order_id} 不在剩餘池中。")
+
+    # 2. 從總表中移除已被備註配走的人
+    merged = merged[~merged["工單號碼"].isin(used_order_ids)].copy()
+
     # -------------------------------
     # 無須配對條件
     mask_no_pair = (
@@ -435,71 +520,6 @@ def process_schedule_data():
     )
     no_pair_df = merged[mask_no_pair].copy().reset_index(drop=True)
     remaining_df = merged[~mask_no_pair].copy().reset_index(drop=True)
-
-    # -------------------------------
-    # 88cm 配對
-    pair_rows_88 = []
-    df_81c_remarks = merged[(merged["工單號碼"].str.startswith("81C")) & (merged["備註"].notna())]
-    for _, c_order in df_81c_remarks.iterrows():
-        # 🌟 修正點 1: 從備註中提取乾淨的工單 ID 🌟
-        raw_remark = str(c_order["備註"]).strip()
-        match = re.match(r"(81[A-Z]\d{5})", raw_remark) # 匹配 "81XNNNNN" 格式
-        
-        if match:
-            pair_order_id = match.group(1) # 取得乾淨的 ID，例如 "81A03766"
-        else:
-            continue # 無效 ID，跳過此 $81C$ 工單
-            
-        # pair_order_id = c_order["備註"]  <-- 移除或註解掉原本的行
-        matched_rows = remaining_df[remaining_df["工單號碼"] == pair_order_id]
-        if matched_rows.empty:
-            continue
-        
-        a_order = matched_rows.iloc[0]
-        for cars in range(1, 8):
-            total_cm = a_order["總長度(cm)"] + c_order["寬度Cm"] * cars
-            if abs(total_cm - 88) <= 1:
-                a_copy = a_order.copy()
-                c_copy = c_order.copy()
-                c_copy["車數"] = cars
-                c_copy["總長度(cm)"] = c_copy["寬度Cm"] * cars
-                c_copy["刀次"] = 0
-                pair_rows_88.extend([a_copy, c_copy])
-                remaining_df = remaining_df[~remaining_df["工單號碼"].isin([pair_order_id, c_order["工單號碼"]])]
-                break
-
-    # -------------------------------
-    # 68cm 配對
-    pair_rows_68 = []
-    df_81c_remain = remaining_df[(remaining_df["工單號碼"].str.startswith("81C")) & (remaining_df["備註"].notna())]
-    for _, c_order in df_81c_remain.iterrows():
-        
-        # 🌟 修正點 2: 從備註中提取乾淨的工單 ID 🌟
-        raw_remark = str(c_order["備註"]).strip()
-        match = re.match(r"(81[A-Z]\d{5})", raw_remark) # 匹配 "81XNNNNN" 格式
-        
-        if match:
-            pair_order_id = match.group(1) # 取得乾淨的 ID
-        else:
-            continue # 無效 ID，跳過此 $81C$ 工單
-            
-        # pair_order_id = c_order["備註"]  <-- 移除或註解掉原本的行
-        matched_rows = remaining_df[remaining_df["工單號碼"] == pair_order_id]
-        if matched_rows.empty:
-            continue
-        
-        a_order = matched_rows.iloc[0]
-        for cars in range(1, 5):
-            total_cm = a_order["總長度(cm)"] + c_order["寬度Cm"] * cars
-            if abs(total_cm - 68) <= 1:
-                a_copy = a_order.copy()
-                c_copy = c_order.copy()
-                c_copy["車數"] = cars
-                c_copy["總長度(cm)"] = c_copy["寬度Cm"] * cars
-                c_copy["刀次"] = 0
-                pair_rows_68.extend([a_copy, c_copy])
-                remaining_df = remaining_df[~remaining_df["工單號碼"].isin([pair_order_id, c_order["工單號碼"]])]
-                break
 
     # -------------------------------
     # 搭1料號配對（改為支援同一料號多筆 base 設定，每筆 candidate 要求所有子料號同時存在）
@@ -691,10 +711,12 @@ def process_schedule_data():
 
     # -------------------------------
     # 合併所有配對結果
-    paired_df_88 = pd.DataFrame(pair_rows_88)
-    paired_df_68 = pd.DataFrame(pair_rows_68)
+    #paired_df_88 = pd.DataFrame(pair_rows_88)
+    #paired_df_68 = pd.DataFrame(pair_rows_68)
+    pair_rows_remark = pd.DataFrame(pair_rows_remark)
     paired_df_d1 = pd.DataFrame(pair_rows_d1)
-    all_paired_df = pd.concat([df for df in [paired_df_88, paired_df_68, paired_df_d1] if not df.empty], ignore_index=True)
+    #all_paired_df = pd.concat([df for df in [paired_df_88, paired_df_68, paired_df_d1] if not df.empty], ignore_index=True)
+    all_paired_df = pd.concat([df for df in [pair_rows_remark, paired_df_d1] if not df.empty], ignore_index=True)
 
     # ==========================================================
     # 搭2配對（根據備註欄位，再去確認搭1或搭2料號）
@@ -875,8 +897,8 @@ def process_schedule_data():
     # 
 
     return {
-        "paired_df_88": paired_df_88,
-        "paired_df_68": paired_df_68,
+        #"paired_df_88": paired_df_88,
+        #"paired_df_68": paired_df_68,
         "paired_df_d1": paired_df_d1,
         "remaining_df": remaining_df,
         "no_pair_df": no_pair_df,
@@ -1964,10 +1986,9 @@ def find_68cm_combination(row_i, row_j, max_car=68):
     return None
 
 # 將可以配對的進行配對 根據 mode 去找要88cm or 68cm的品號
-def remaining_cut_clean_and_repair(df_paired_split, df, mode="88cm", cut_limit=55):
+def remaining_cut_clean_and_repair(df_paired_split, df, order_df, mode="88cm", cut_limit=55):
     """
-    mode: "88cm" → 處理非 B110A
-          "68cm" → 處理 B110A
+    order_df: 包含原始 '工單編號' 與 '開工數量' 的 DataFrame
     """
     df = df.copy()
     df["公分"] = pd.to_numeric(df["公分"], errors="coerce")
@@ -1976,10 +1997,13 @@ def remaining_cut_clean_and_repair(df_paired_split, df, mode="88cm", cut_limit=5
     df["品號結尾"] = df["品號"].str[-2:]
     df["is_B110A"] = df["品號"].str.startswith("B110A")
 
+    # 🌟 建立防呆對照表：工單編號 -> 原始開工數量
+    # 確保工單編號轉為字串避免對比失敗
+    qty_ref = order_df.set_index(order_df["工單號碼"].astype(str))["開工數量"].to_dict()
+
     merged_indices = set()
     leftover_rows = []
 
-    # 判斷處理範圍
     if mode == "88cm":
         target_df = df[~df["is_B110A"]]
         find_func = find_88cm_combination
@@ -1989,71 +2013,66 @@ def remaining_cut_clean_and_repair(df_paired_split, df, mode="88cm", cut_limit=5
     else:
         raise ValueError("mode 必須是 '88cm' 或 '68cm'")
 
-    # --- 核心配對流程 ---
     for prefix, group in target_df.groupby("品號前綴"):
         group = group.reset_index()
         n = len(group)
 
         for i in range(n):
             idx_i = group.at[i, "index"]
-            if idx_i in merged_indices:
-                continue
+            if idx_i in merged_indices: continue
 
             row_i = df.loc[idx_i]
+            main_order_id = str(row_i["工單編號"])
+
+            # 🌟 核心防呆：從 order_df 抓取最原始的開工數量
+            # 如果查不到，就退而求其次用當前的預估良品數
+            raw_qty_i = qty_ref.get(main_order_id, row_i["預估良品數"])
 
             for j in range(i + 1, n):
                 idx_j = group.at[j, "index"]
-                if idx_j in merged_indices:
-                    continue
+                if idx_j in merged_indices: continue
                 row_j = df.loc[idx_j]
-
-                if row_i["品號結尾"] != row_j["品號結尾"]:
-                    continue
+                
+                if row_i["品號結尾"] != row_j["品號結尾"]: continue
 
                 res = find_func(row_i, row_j)
                 if res:
                     ci, cj = res
+                    
+                    # 🌟 計算刀次：使用 raw_qty_i 確保基準正確
+                    # 加上 round(..., 2) 徹底解決 60.000000001 的問題
+                    main_cut = math.ceil(round(raw_qty_i, 2) / ci) if ci > 0 else 0
+
+                    print(f"\n🔍 [DEBUG 配對校準]")
+                    print(f"  工單: {main_order_id}, 原始開工量: {raw_qty_i}, 車數: {ci} -> 最終刀次: {main_cut}")
 
                     main_car = ci
-                    main_cut = int(row_i["預估良品數"] / ci)
-
                     child_car = cj
                     child_cut = 0
+                    
+                    # 子工單產出
                     child_qty = main_cut * child_car
-
-                    main_qty = row_i["預估良品數"] - child_qty
-                    if main_qty < 0:
-                        main_qty = 0
+                    
+                    # 重新計算這一次分配掉的數量 (不應超過剩餘可用量)
+                    main_qty = row_i["預估良品數"]
 
                     main_order = row_i.copy()
                     main_order["車數"] = main_car
                     main_order["刀次"] = main_cut
-                    main_order["預估良品數"] = main_qty
+                    main_order["預估良品數"] = main_qty 
 
                     child_order = row_j.copy()
                     child_order["車數"] = child_car
                     child_order["刀次"] = child_cut
                     child_order["預估良品數"] = child_qty
 
-                    # === 檢查主工單的剩餘可配量 ===
-                    main_order_id = str(row_i["工單編號"])
-
-                    # 從 global map 撈取目前可用數量（經過歷史扣除後的最新數量）
+                    # --- 剩餘額度檢查 ---
                     original_qty = int(GLOBAL_ORDER_QTY_MAP.get(main_order_id, 0))
-
-                    if "工單編號" in df_paired_split.columns:
-                        used_qty = df_paired_split.loc[
-                            df_paired_split["工單編號"] == main_order_id, "預估良品數"
-                        ].sum()
-                    else:
-                        used_qty = 0
-
+                    used_qty = df_paired_split[df_paired_split["工單編號"] == main_order_id]["預估良品數"].sum() if not df_paired_split.empty else 0
                     available_qty = original_qty - used_qty
-                    print(f"要配對工單{main_order_id} 開工數量 {original_qty} 已使用數量 {used_qty}")
 
-                    # 如果主工單已經用完，就跳過
                     if available_qty <= 0:
-                        print(f"⚠️ 工單 {main_order_id} 已使用完（已用 {used_qty}/{original_qty}），跳過。")
+                        print(f"⚠️ 工單 {main_order_id} 額度已滿，跳過。")
                         continue
 
                     df_pair_split = split_pair_orders(main_order, child_order, cut_limit=cut_limit)
@@ -2061,6 +2080,7 @@ def remaining_cut_clean_and_repair(df_paired_split, df, mode="88cm", cut_limit=5
 
                     merged_indices.update([idx_i, idx_j])
 
+                    # 處理子工單餘數
                     leftover_qty = row_j["預估良品數"] - child_qty
                     if leftover_qty > 0:
                         leftover_order = row_j.copy()
@@ -2068,7 +2088,6 @@ def remaining_cut_clean_and_repair(df_paired_split, df, mode="88cm", cut_limit=5
                         leftover_order["刀次"] = math.ceil(leftover_qty / row_j["車數"])
                         leftover_order["車數"] = row_j["車數"]
                         leftover_rows.append(leftover_order)
-
                     break
 
     # --- 未配對 ---
@@ -4852,7 +4871,9 @@ def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookba
 
 def final_cal_list_person(df: pd.DataFrame, start_d: datetime.date, holiday_map: dict) -> pd.DataFrame:
     df = df.copy()
-    
+    if df.empty:
+        return df
+
     # 1. 統一起始日期型態
     if isinstance(start_d, pd.Timestamp):
         start_d = start_d.date()
@@ -4867,62 +4888,75 @@ def final_cal_list_person(df: pd.DataFrame, start_d: datetime.date, holiday_map:
     sku_list = df.get("品號", pd.Series([None]*len(doses))).tolist()
     new_dates = []
     
-    # 初始化日期指標
     current_date_pointer = start_d 
 
     for dose, sku in zip(doses, sku_list):
-        if dose == 0:
-            new_dates.append(new_dates[-1] if new_dates else current_date_pointer)
+        # 處理子工單或 0 刀次工單：直接跟隨前一筆日期
+        if dose <= 0:
+            target_dt = new_dates[-1] if new_dates else current_date_pointer
+            # 確保是 date 物件
+            if hasattr(target_dt, 'date'): target_dt = target_dt.date()
+            new_dates.append(target_dt)
             continue
 
+        search_count = 0 # 安全防線計數
         while True:
+            search_count += 1
             target_date = current_date_pointer.date() if hasattr(current_date_pointer, 'date') else current_date_pointer
             
-            # 取得該日請假權重
             multiplier = holiday_map.get(target_date, 1.0)
             wd = target_date.weekday()
             
-            # 判斷是否為可排程的工作日
+            # 判斷工作日 (一~五) 且 產能權重 > 0
             if wd < 5 and multiplier > 0:
                 used_info = capacity_used.get(target_date, {"count": 0, "sku_set": set(), "nonzero_sku_list": []})
 
-                # 判斷 SKU 集中度以決定產能上限
+                # 決定該日產能上限
                 current_nonzero_skus = [s for s in used_info["nonzero_sku_list"] if s is not None]
                 if sku is not None and sku not in current_nonzero_skus:
                     current_nonzero_skus.append(sku)
 
                 is_single_sku = (len(set(current_nonzero_skus)) <= 1)
                 is_special_day = (wd in [2, 4])
-
-                # 【修正點】明確定義 base_limit
-                if is_single_sku and is_special_day:
-                    current_base_limit = special_limit
-                else:
-                    current_base_limit = daily_limits.get(wd, 55)
                 
-                # 計算該日最終剩餘上限
+                current_base_limit = special_limit if (is_single_sku and is_special_day) else daily_limits.get(wd, 55)
                 limit = int(current_base_limit * multiplier)
 
-                # 檢查剩餘空間
+                # 🚀 核心修正：如果單筆刀次大於單日總上限，強行塞入這天，避免死迴圈
+                if dose > limit:
+                    print(f"⚠️ 警告: 工單刀次({dose}) > 單日上限({limit})，強制排入 {target_date}")
+                    used_info["count"] += dose
+                    used_info["sku_set"].add(sku)
+                    capacity_used[target_date] = used_info
+                    new_dates.append(target_date)
+                    break 
+
+                # 正常產能檢查
                 if used_info["count"] + dose <= limit:
                     used_info["count"] += dose
                     used_info["sku_set"].add(sku)
-                    if dose != 0 and sku is not None:
-                        if sku not in used_info["nonzero_sku_list"]:
-                            used_info["nonzero_sku_list"].append(sku)
+                    if sku is not None and sku not in used_info["nonzero_sku_list"]:
+                        used_info["nonzero_sku_list"].append(sku)
                     
                     capacity_used[target_date] = used_info
                     new_dates.append(target_date)
-                    break # 成功排入，處理下一筆工單
+                    break 
 
-            # 若當天無產能或已滿，推移至隔天
+            # 若產能已滿，推移至隔天
             current_date_pointer += timedelta(days=1)
+            
+            # 極端安全防線：搜尋超過 365 天自動放棄
+            if search_count > 365:
+                print(f"❌ 嚴重錯誤: 工單無法排入，已搜尋一年。強制設定於 {target_date}")
+                new_dates.append(target_date)
+                break
 
-    # 2. 【關鍵修正】強制同步欄位名稱，防止主程式 KeyError
-    formatted_dates = [d.strftime("%Y/%m/%d") for d in new_dates]
-    df.loc[:, "預計開工日"] = formatted_dates
-    df.loc[:, "實際排程日期"] = formatted_dates # 補上這個欄位
-    df.loc[:, "預計完工日"] = formatted_dates
+    # 確保輸出的長度一致
+    if len(new_dates) == len(df):
+        formatted_dates = [d.strftime("%Y/%m/%d") for d in new_dates]
+        df.loc[:, "預計開工日"] = formatted_dates
+        df.loc[:, "預計完工日"] = formatted_dates
+        df.loc[:, "實際排程日期"] = formatted_dates
     
     return df
 
@@ -5523,10 +5557,11 @@ def final_clean_and_reorder(df, order_df):
     # 【新增邏輯】日期格式化 (確保能比較大小)
     df['預計開工日'] = pd.to_datetime(df['預計開工日'], errors='coerce')
     df['預計完工日'] = pd.to_datetime(df['預計完工日'], errors='coerce')
+    df['預計入庫日'] = pd.to_datetime(df['預計入庫日'], errors='coerce')
 
     # 2. 計算最早/最晚 (這時候還是 datetime 格式)
     df['主工單最早開工'] = df.groupby('工單編號')['預計開工日'].transform('min')
-    df['主工單最晚完工'] = df.groupby('工單編號')['預計完工日'].transform('max')
+    df['主工單最晚完工'] = df.groupby('工單編號')['預計入庫日'].transform('max')
 
     # 3. 【就在這裡改！】計算完畢後，立刻轉成你要的字串格式
     # 定義一個小工具來處理 2026/2/5 這種不補零的格式
@@ -5537,6 +5572,7 @@ def final_clean_and_reorder(df, order_df):
     df['主工單最晚完工'] = df['主工單最晚完工'].apply(format_date)
     df['預計開工日'] = df['預計開工日'].apply(format_date)
     df['預計完工日'] = df['預計完工日'].apply(format_date)
+    df['預計入庫日'] = df['預計入庫日'].apply(format_date)
 
     # 計算主工單編號下的原始總產出
     df['主工單總數量'] = df.groupby('工單編號')['預估良品數'].transform('sum')
@@ -5588,11 +5624,11 @@ def final_clean_and_reorder(df, order_df):
     final_df['餘數'] = final_df['主工單總數量'] - final_df['被搭接總量']
 
     # --- 步驟 6: 整理欄位 ---
-    final_df = final_df.rename(columns={'工單編號': '主工單號', '品號': '料號', '主工單最早開工': '預計開工日', '主工單最晚完工': '預計完工日'})
+    final_df = final_df.rename(columns={'工單編號': '主工單號', '品號': '料號', '主工單最早開工': '預計開工日', '主工單最晚完工': '預計入庫日'})
     final_df['須補數量'] = final_df['餘數'] - final_df['預估良品']
     final_df['多切工單'] = ""
 
-    base_cols = ['主工單號', '料號', '客戶需求日', '預計開工日', '預計完工日', '開工數量', '預估良品', '餘數', '須補數量', '多切工單'] 
+    base_cols = ['主工單號', '料號', '客戶需求日', '預計開工日', '預計入庫日', '開工數量', '預估良品', '餘數', '須補數量', '多切工單'] 
     partner_cols = []
     for i in range(1, 6): 
         for suffix in ['工單', '料號', '數量']:
@@ -5627,8 +5663,8 @@ def main():
     df_no_pair = result["no_pair_df"]
     df_paired = result["paired_df"]
     df_history = result["df_history"]
-    df_88 = result["paired_df_88"]
-    df_68 = result["paired_df_68"]
+    #df_88 = result["paired_df_88"]
+    #df_68 = result["paired_df_68"]
     df_d1 = result["paired_df_d1"]
     base_df = result["base_df"]
     order_df = result["order_df"]
@@ -5655,8 +5691,8 @@ def main():
     df_reamining_second_final = cleanup_remaining_df(df_reamining_second)
     
     # 新增功能 找到可以搭配的 88cm and 68cm
-    df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split_3, df_reamining_second_final, mode = "88cm") 
-    df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split, remaining, mode = "68cm") 
+    df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split_3, df_reamining_second_final, order_df, mode = "88cm") 
+    df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split, remaining, order_df, mode = "68cm") 
 
     # 處理remaining中可以搭配的 加入一種料號 兩種以上搭配方法的邏輯
     df_paired_split_final, remaining_final = remaining_paired_detail(df_paired_split, remaining, base_df) 
@@ -5854,6 +5890,7 @@ def main():
         #df_paired.to_excel(writer, sheet_name="配對", index=False)
         #df_no_pair.to_excel(writer, sheet_name="不需配對", index=False)
         #df_remaining_first.to_excel(writer, sheet_name="剩餘工單1", index=False)
+        #order_df.to_excel(writer, sheet_name="第一階段", index=False)
 
         #df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
         #extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
