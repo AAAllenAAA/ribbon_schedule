@@ -50,7 +50,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-#print = block_print
+print = block_print
 
 def universal_excel_loader(file_path):
     # 1. 取得絕對路徑（Excel COM 元件要求必須是絕對路徑）
@@ -1475,13 +1475,23 @@ def process_schedule_data_second(order_df, base_df):
 
     # 6️⃣ 無須配對條件挑出 no_pair_df
     mask_no_pair = (
+        # 條件 1：81A/81B 開頭且不用搭產 (維持原樣)
         (merged["工單編號"].str.startswith(("81A", "81B")) &
-         (merged["搭1產出車數"] == 0) &
-         (merged["刀次"] % 1 == 0))
+        (merged["搭1產出車數"] == 0) &
+        (merged["刀次"] % 1 == 0))
         |
-        ((merged["刀次"] % 1 == 0) &
-         (merged["預估良品數"] == (merged["車數"] * merged["刀次"]).round()) &
-         (merged["總長度(cm)"].isin([68, 88, 89])))
+        # 條件 2：根據品號動態判定標準長度
+        (
+            (merged["刀次"] % 1 == 0) &
+            (merged["預估良品數"] == (merged["車數"] * merged["刀次"]).round()) &
+            (
+                # 分流 A：B110A 開頭，長度必須是 68
+                (merged["品號"].str.startswith("B110A") & (merged["總長度(cm)"] == 68)) 
+                | 
+                # 分流 B：非 B110A 開頭，長度必須是 88 或 89
+                (~merged["品號"].str.startswith("B110A") & (merged["總長度(cm)"].isin([88, 89])))
+            )
+        )
     )
 
     no_pair_df = merged[mask_no_pair].copy()
@@ -6518,40 +6528,40 @@ def main():
         except PermissionError:
             raise Exception(f"Excel 檔案 {output_name} 已開啟，請先關閉後再執行。")
     with pd.ExcelWriter(output_name, engine="openpyxl") as writer:
-        #base_df.to_excel(writer, sheet_name="基本資料", index=False)
+        base_df.to_excel(writer, sheet_name="基本資料", index=False)
         #df_88.to_excel(writer, sheet_name="88", index=False)
-        #df_68.to_excel(writer, sheet_name="68", index=False)
+        #f_68.to_excel(writer, sheet_name="68", index=False)
         #df_d1.to_excel(writer, sheet_name="d1", index=False)
         #df_paired.to_excel(writer, sheet_name="配對", index=False)
         #f_no_pair.to_excel(writer, sheet_name="不需配對", index=False)
         #df_remaining_first.to_excel(writer, sheet_name="剩餘工單1", index=False)
 
-        #df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
-        #extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
-        #df_paired_split_2.to_excel(writer, sheet_name="配對後結果2", index=False)
-        #extra_remaining.to_excel(writer, sheet_name="配對後剩餘2", index=False)
-        #df_paired_split_3.to_excel(writer, sheet_name="配對後結果3", index=False)
-        #extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
+        df_paired_split_1.to_excel(writer, sheet_name="配對後結果1", index=False)
+        extra_remaining_1.to_excel(writer, sheet_name="配對後剩餘1", index=False)
+        df_paired_split_2.to_excel(writer, sheet_name="配對後結果2", index=False)
+        extra_remaining.to_excel(writer, sheet_name="配對後剩餘2", index=False)
+        df_paired_split_3.to_excel(writer, sheet_name="配對後結果3", index=False)
+        extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
 
-        #df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
-        #df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
-        #df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
+        df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
+        df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
+        df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
 
-        #df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
-        #remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
+        df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
+        remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
 
-        #df_no_pair_second.to_excel(writer, sheet_name="第二次配對後不需配對", index=False)
-        #df_paired_split_final.to_excel(writer, sheet_name="配對後final", index=False)
-        #remaining_final.to_excel(writer, sheet_name="配對後剩餘final", index=False)
-        #df_no_pair_split.to_excel(writer, sheet_name="不需配對", index=False)
+        df_no_pair_second.to_excel(writer, sheet_name="第二次配對後不需配對", index=False)
+        df_paired_split_final.to_excel(writer, sheet_name="配對後final", index=False)
+        remaining_final.to_excel(writer, sheet_name="配對後剩餘final", index=False)
+        df_no_pair_split.to_excel(writer, sheet_name="不需配對", index=False)
 
-        #debug.to_excel(writer, sheet_name="doassignandsort_debug", index=False)
-        #final_remaining.to_excel(writer, sheet_name="最後剩餘", index=False)
+        debug.to_excel(writer, sheet_name="doassignandsort_debug", index=False)
+        final_remaining.to_excel(writer, sheet_name="最後剩餘", index=False)
         #df_no_pair_second_mutable.to_excel(writer, sheet_name="all中nopair2", index=False)
         #df_no_pair_split_mutable.to_excel(writer, sheet_name="all中nopair1", index=False)
-        #all.to_excel(writer, sheet_name="未分配前all", index=False)
-        #final_remaining_new.to_excel(writer, sheet_name="最後剩餘修正", index=False)
-        #all_final.to_excel(writer, sheet_name="未分配前all_final", index=False)
+        all.to_excel(writer, sheet_name="未分配前all", index=False)
+        final_remaining_new.to_excel(writer, sheet_name="最後剩餘修正", index=False)
+        all_final.to_excel(writer, sheet_name="未分配前all_final", index=False)
 
         #final_output.to_excel(writer, sheet_name="排列初版", index=False)
 
@@ -6584,31 +6594,31 @@ def main():
         #A159_1.to_excel(writer, sheet_name="家偉_1", index=False)
         #A159_2.to_excel(writer, sheet_name="家偉_2", index=False)
 
-        A159_part_end_merge.to_excel(writer, sheet_name="家偉_merge", index=False)
-        B201_part_end_merge.to_excel(writer, sheet_name="旺斌_merge", index=False)
-        A830_part_end_merge.to_excel(writer, sheet_name="容合_merge", index=False)
+        #A159_part_end_merge.to_excel(writer, sheet_name="家偉_merge", index=False)
+        #B201_part_end_merge.to_excel(writer, sheet_name="旺斌_merge", index=False)
+        #A830_part_end_merge.to_excel(writer, sheet_name="容合_merge", index=False)
 
-        A159_part_end_reorder.to_excel(writer, sheet_name="家偉_reorder", index=False)
-        B201_part_end_reorder.to_excel(writer, sheet_name="旺斌_reorder", index=False)
-        A830_part_end_reorder.to_excel(writer, sheet_name="容合_reorder", index=False)
+        #A159_part_end_reorder.to_excel(writer, sheet_name="家偉_reorder", index=False)
+        #B201_part_end_reorder.to_excel(writer, sheet_name="旺斌_reorder", index=False)
+        #A830_part_end_reorder.to_excel(writer, sheet_name="容合_reorder", index=False)
 
-        A159_part_end.to_excel(writer, sheet_name="家偉_final", index=False)
-        B201_part_end.to_excel(writer, sheet_name="旺斌_final", index=False)
-        A830_part_end.to_excel(writer, sheet_name="容合_final", index=False)
+        #A159_part_end.to_excel(writer, sheet_name="家偉_final", index=False)
+        #B201_part_end.to_excel(writer, sheet_name="旺斌_final", index=False)
+        #A830_part_end.to_excel(writer, sheet_name="容合_final", index=False)
 
         #_apply, _fill
         #A159_part_end_1.to_excel(writer, sheet_name="家偉_1", index=False)
         #B201_part_end_1.to_excel(writer, sheet_name="旺斌_1", index=False)
         #A830_part_end_1.to_excel(writer, sheet_name="容合_1", index=False)
-        A159_new_apply.to_excel(writer, sheet_name="家偉_apply", index=False)
-        B201_new_apply.to_excel(writer, sheet_name="旺斌_apply", index=False)
-        A830_new_apply.to_excel(writer, sheet_name="容合_apply", index=False)
-        A159_new_fill.to_excel(writer, sheet_name="家偉_fill", index=False)
-        B201_new_fill.to_excel(writer, sheet_name="旺斌_fill", index=False)
-        A830_new_fill.to_excel(writer, sheet_name="容合_fill", index=False)
-        A159_new_rebalance.to_excel(writer, sheet_name="家偉_rebalance", index=False)
-        B201_new_rebalance.to_excel(writer, sheet_name="旺斌_rebalance", index=False)
-        A830_new_rebalance.to_excel(writer, sheet_name="容合_rebalance", index=False)
+        #A159_new_apply.to_excel(writer, sheet_name="家偉_apply", index=False)
+        #B201_new_apply.to_excel(writer, sheet_name="旺斌_apply", index=False)
+        #A830_new_apply.to_excel(writer, sheet_name="容合_apply", index=False)
+        #A159_new_fill.to_excel(writer, sheet_name="家偉_fill", index=False)
+        #B201_new_fill.to_excel(writer, sheet_name="旺斌_fill", index=False)
+        #A830_new_fill.to_excel(writer, sheet_name="容合_fill", index=False)
+        #A159_new_rebalance.to_excel(writer, sheet_name="家偉_rebalance", index=False)
+        #B201_new_rebalance.to_excel(writer, sheet_name="旺斌_rebalance", index=False)
+        #A830_new_rebalance.to_excel(writer, sheet_name="容合_rebalance", index=False)
 
         # A830_new, B201_new, A159_new
         A159_new.to_excel(writer, sheet_name="家偉", index=False)

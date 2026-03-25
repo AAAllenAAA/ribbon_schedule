@@ -1371,13 +1371,23 @@ def process_schedule_data_second(order_df, base_df):
 
     # 6️⃣ 無須配對條件挑出 no_pair_df
     mask_no_pair = (
+        # 條件 1：81A/81B 開頭且不用搭產 (維持原樣)
         (merged["工單編號"].str.startswith(("81A", "81B")) &
-         (merged["搭1產出車數"] == 0) &
-         (merged["刀次"] % 1 == 0))
+        (merged["搭1產出車數"] == 0) &
+        (merged["刀次"] % 1 == 0))
         |
-        ((merged["刀次"] % 1 == 0) &
-         (merged["預估良品數"] == (merged["車數"] * merged["刀次"]).round()) &
-         (merged["總長度(cm)"].isin([68, 88, 89])))
+        # 條件 2：根據品號動態判定標準長度
+        (
+            (merged["刀次"] % 1 == 0) &
+            (merged["預估良品數"] == (merged["車數"] * merged["刀次"]).round()) &
+            (
+                # 分流 A：B110A 開頭，長度必須是 68
+                (merged["品號"].str.startswith("B110A") & (merged["總長度(cm)"] == 68)) 
+                | 
+                # 分流 B：非 B110A 開頭，長度必須是 88 或 89
+                (~merged["品號"].str.startswith("B110A") & (merged["總長度(cm)"].isin([88, 89])))
+            )
+        )
     )
 
     no_pair_df = merged[mask_no_pair].copy()
