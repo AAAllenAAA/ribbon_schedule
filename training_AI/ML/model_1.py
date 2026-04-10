@@ -1,6 +1,7 @@
-# ml_scorer.py (排程優化核心模組)
+# model_1.py(ml_scorer.py) (排程優化核心模組)
 '''
 模型服務接口:
+核心工作： 載入模型 -> 重現「原料材質」與「跨日銜接」特徵工程 -> 呼叫模型進行預測 -> 返回 AI_Prob 分數。
 這是專門為 predict_AI_result.py 服務的模組。它的職責是將工單數據傳遞給 ML 模型並獲取預測結果。
 核心工作： 載入 schedule_pairing_classifier.pkl 和 scaler.pkl -> 重現 create_ml_data.py 的特徵工程 -> 呼叫模型進行預測 -> 將 AI_Prob 分數返回給主程式。
 '''

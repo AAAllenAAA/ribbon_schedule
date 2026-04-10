@@ -5,6 +5,7 @@
 並使用機器學習演算法（如您的分類器）進行學習。 
 核心工作： 執行訓練、選擇最佳參數、並將訓練好的模型和數據預處理工具保存下來。 
 輸出檔案： schedule_pairing_classifier.pkl (模型主體) 和 scaler.pkl (標準化工具)。
+核心工作： 載入新版 ML_Training.csv -> 學習「原料材質」與「跨日銜接」權重 -> 儲存模型與 Scaler。
 '''
 import pandas as pd
 import joblib

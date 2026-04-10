@@ -2,7 +2,7 @@
 '''
 主控台:
 這是實際運行排程優化流程的主程式。它負責整個流程的控制和邏輯判斷。
-核心工作： 讀取排程 $\to$ 呼叫 model_1.py 獲取分數 $\to$ 執行 optimize_schedule_order 優化演算法 $\to$ 生成最終的 Excel 報告。
+核心工作： 讀取排程 -> 呼叫 model_1.py 獲取分數 -> 執行 optimize_schedule_order 優化演算法 -> 生成最終的 Excel 報告。
 '''
 import pandas as pd
 import numpy as np

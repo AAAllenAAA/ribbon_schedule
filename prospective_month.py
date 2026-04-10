@@ -3355,11 +3355,13 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
                        daily_standard: int = 165) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     將每個人 (A_df, B_df, C_df) 的工單往前遞補滿每日標準刀次。
-    修正邏輯：每次補刀時即時計算當日品號種類數與新上限，避免超過限制。
+    修正邏輯：
+    1. 每次補刀時即時計算當日品號種類數與新上限，避免超過限制。
+    2. 超額遞延時，優先推遲至下一個「已有排程」的日期，避免隨意創造新日期。
     """
 
-    MAX_KNIFE_MAP = {1:60, 2:55, 3:51, 4:47, 5:43, 6:39}
-    prefix_rules = {"B110":5, "TTR":4, "UTMX":4, "UTM":3}
+    MAX_KNIFE_MAP = {1: 60, 2: 55, 3: 51, 4: 47, 5: 43, 6: 39}
+    prefix_rules = {"B110": 5, "TTR": 4, "UTMX": 4, "UTM": 3}
     default_prefix_len = 3
 
     def get_item_group_key(item_code: str) -> str:
@@ -3375,7 +3377,7 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
     def process_one(df: pd.DataFrame, person_name: str) -> pd.DataFrame:
         if df is None or df.empty:
             return df.copy()
-       
+        
         df = df.copy().reset_index(drop=True)
         df["預計開工日"] = pd.to_datetime(df["預計開工日"], errors="coerce")
         df["預計完工日"] = pd.to_datetime(df["預計完工日"], errors="coerce")
@@ -3384,8 +3386,8 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
         orders = []
         last_main = None
         for i, row in df.iterrows():
-            knives = safe_int_conversion(row.get("刀次",0))
-            cars = safe_int_conversion(row.get("車數",0))
+            knives = safe_int_conversion(row.get("刀次", 0))
+            cars = safe_int_conversion(row.get("車數", 0))
             od = {"orig_idx": i, "orig_row": row.copy(), "remain": knives, "car": cars, "children": [], "slices": {}}
             if knives > 0:
                 od["slices"][row["預計開工日"].normalize()] = knives
@@ -3401,9 +3403,8 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
         if not orders:
             return df
 
+        # 取得所有原始排程日期並排序
         all_dates = sorted({d.normalize() for od in orders for d in od["slices"].keys() if pd.notna(d)})
-
-        # 移除原程式中冗餘的 daily_status 初始化區塊
 
         # === 核心排程迴圈：使用 while 進行動態日期管理 ===
         date_idx = 0
@@ -3411,82 +3412,72 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
             current_date = all_dates[date_idx]
             
             # 1. 計算當日初始狀態
-            daily_ods = [od for od in orders if current_date in od["slices"] and od["slices"][current_date]>0]
+            daily_ods = [od for od in orders if current_date in od["slices"] and od["slices"][current_date] > 0]
             total_knives = sum(od["slices"][current_date] for od in daily_ods)
             existing_keys = {get_item_group_key(od["orig_row"].get("品號")) for od in daily_ods}
             
-            # 2. 計算即時上限 (使用 MAX_KNIFE_MAP)
+            # 2. 計算即時上限
             num_items = len(existing_keys)
-            day_limit = MAX_KNIFE_MAP.get(num_items, 65 if num_items==0 else 39)
+            day_limit = MAX_KNIFE_MAP.get(num_items, 65 if num_items == 0 else 39)
 
-            # --- PHASE 1: 新增【超額遞延】邏輯 (Push-back Excess) ---
+            # --- PHASE 1: 修正後的【超額遞延】邏輯 ---
             excess = total_knives - day_limit
             
             if excess > 0:
-                # 確定遞延目標：找出當日排程中，刀次最大的工單優先推遲
+                # 找出當日排程中，刀次最大的工單優先推遲
                 ods_to_push = sorted(
                     daily_ods, 
                     key=lambda od: (-od["slices"][current_date], od["orig_idx"]) 
                 )
                 
-                # 找到下一個排程日 (後一天)
-                next_date = current_date + pd.Timedelta(days=1)
-                
-                # 確保 next_date 在 all_dates 列表中，如果沒有則加入並重新排序
-                if next_date not in all_dates:
-                    all_dates.append(next_date)
-                    all_dates.sort()
-                    # 註：此處不需要更新 date_idx，因為我們是將刀次往未來推。
+                # 【修改點】: 尋找下一個合適的日期，而不是盲目 +1 天
+                future_dates = [d for d in all_dates if d > current_date]
+                if future_dates:
+                    # 如果未來原本就有排程日（例如 4/13），就推到最近的那一天
+                    next_date = min(future_dates)
+                else:
+                    # 如果後面完全沒單了，才推到下一個「工作日」(避開週末)
+                    next_date = current_date + pd.offsets.BusinessDay(1)
+                    if next_date not in all_dates:
+                        all_dates.append(next_date)
+                        all_dates.sort()
 
                 pushed_amount = 0
                 for od in ods_to_push:
                     if excess <= 0:
                         break
                         
-                    # 決定推遲的刀次：不超過工單當日刀次，也不超過總溢出量
                     push_target = min(od["slices"][current_date], excess)
                     
                     # 執行遞延：將刀次從 current_date 移到 next_date
                     od["slices"][current_date] -= push_target
-                    # next_date 的刀次增加
                     od["slices"][next_date] = od["slices"].get(next_date, 0) + push_target 
                     
                     excess -= push_target
                     pushed_amount += push_target
                     
-                # 更新狀態 (total_knives 已經減少 pushed_amount)
                 total_knives -= pushed_amount
 
             # --- PHASE 2: 原始【不足遞補】邏輯 (Pull-in Under-Capacity) ---
-            
-            # 使用經過遞延修正後的 total_knives 重新計算可用容量
-            available = max(day_limit - total_knives, 0)
-            
-            # 找未來工單 (必須從 current_date 之後的所有排程中尋找)
             future_cand = []
             for od in orders:
                 for sdate, amt in od["slices"].items():
-                    # 條件：日期必須晚於 current_date 且 amt > 0
-                    if pd.notna(sdate) and sdate > current_date and amt>0:
+                    if pd.notna(sdate) and sdate > current_date and amt > 0:
                         future_cand.append((sdate, od, amt))
-            future_cand.sort(key=lambda x:(x[0], x[1]["orig_idx"]))
+            future_cand.sort(key=lambda x: (x[0], x[1]["orig_idx"]))
 
-            # 補刀邏輯 (原程式碼，保持不變)
             while future_cand:
                 pick_date, pick_od, pick_amt = future_cand[0]
                 pick_key = get_item_group_key(pick_od["orig_row"].get("品號"))
 
-                # 預測加入這筆工單後的品號集合與新上限
                 new_existing_keys = existing_keys | {pick_key}
                 new_num_items = len(new_existing_keys)
                 new_day_limit = MAX_KNIFE_MAP.get(new_num_items, 39)
 
-                # 計算當天剩餘可補刀次
                 remaining_capacity = new_day_limit - total_knives
                 if remaining_capacity <= 0:
                     break
 
-                # 計算補刀量，不超過剩餘容量或工單本身刀次
                 fill_target = min(pick_amt, remaining_capacity)
                 if fill_target <= 0:
                     break
@@ -3500,45 +3491,44 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
                 total_knives += fill_target
                 existing_keys.add(pick_key)
 
-                # 更新候選
                 future_cand = [(d, o, a) for d, o, a in future_cand if o["slices"].get(d, 0) > 0]
             
             # 處理下一天
             date_idx += 1
 
-
-        # 4. 展開成 DataFrame (保持原樣)
+        # 4. 展開成 DataFrame
         out_rows = []
         for od in orders:
-            for sdate, amt in sorted(od["slices"].items(), key=lambda x:x[0]):
-                if amt>0:
-                    # 主工單
+            for sdate, amt in sorted(od["slices"].items(), key=lambda x: x[0]):
+                if amt > 0:
                     main_row = od["orig_row"].copy()
                     main_row["預計開工日"] = sdate
                     main_row["預計完工日"] = sdate
                     main_row["刀次"] = int(amt)
-                    main_car = safe_int_conversion(main_row.get("車數",0))
-                    main_row["預估良品數"] = main_car*int(amt)
+                    main_car = safe_int_conversion(main_row.get("車數", 0))
+                    main_row["預估良品數"] = main_car * int(amt)
                     out_rows.append(main_row)
                     
-                    # 子工單
                     for ch in od["children"]:
                         ch_row = ch.copy()
                         ch_row["預計開工日"] = sdate
                         ch_row["預計完工日"] = sdate
                         ch_row["刀次"] = 0
-                        ch_car = safe_int_conversion(ch_row.get("車數",0))
-                        # 良品數仍基於 amt (主工單刀次) 計算
-                        ch_row["預估良品數"] = ch_car*int(amt) 
+                        ch_car = safe_int_conversion(ch_row.get("車數", 0))
+                        ch_row["預估良品數"] = ch_car * int(amt) 
                         if "餘量" in ch_row.index:
                             ch_row["餘量"] = ch_row["預估良品數"]
                         out_rows.append(ch_row)
+
+        if not out_rows:
+            return pd.DataFrame(columns=df.columns)
 
         out_df = pd.DataFrame(out_rows)
         out_df["預計開工日"] = out_df["預計開工日"].dt.strftime("%Y-%m-%d")
         out_df["預計完工日"] = out_df["預計完工日"].dt.strftime("%Y-%m-%d")
         return out_df.reset_index(drop=True)
 
+    # 執行三個人員的處理
     A_out = process_one(A_df, "容合 (A830)")
     B_out = process_one(B_df, "旺斌 (B201)")
     C_out = process_one(C_df, "家偉 (A159)")
@@ -4447,125 +4437,110 @@ def schedule_history_download(part_end_list, history):
 
 def assign_personnel_by_similarity(df: pd.DataFrame, personnel_list: List[str] = None) -> Tuple[pd.DataFrame, Dict]:
     """
-    1. 81B 強制專任：唯一主工單ID 為 81B 開頭 -> A159。
-    2. 81A 與其他強制分配：非 81B 的所有工單 -> 由 A830, B201 依相似性與負荷平分。
-    3. 排除 A159：在自動分配階段，A159 不在候選名單內。
-    4. 排序優先: 同料同公分 > 同料 > 同公分
+    優化邏輯：
+    1. 固定既有分配：已有人員的工單不動，並作為後續相似性判定的基準。
+    2. 材質集中化：優先將相同材質分配給同一人，減少全廠換料總次數。
+    3. 負荷平分：當某人材質工作量過大時，才分給下一位。
     """
-    
     if personnel_list is None:
         personnel_list = ["A159", "A830", "B201"]
-        
-    df_result = df.copy() 
-    debug_log: Dict[str, Dict[str, Any]] = {} 
-    
+
+    df_result = df.copy()
+    debug_log = {}
+
     # ----------------------------------------------------
-    # 步驟 1: 基礎清理
+    # 1. 基礎清理與預處理
     # ----------------------------------------------------
-    # 統一清理 ID 格式
-    df_result['唯一主工單ID'] = df_result['唯一主工單ID'].astype(str).str.strip().str.upper() 
-    df_result['尺寸公分'] = df_result['公分'].fillna('N/A').astype(str)
+    df_result['唯一主工單ID'] = df_result['唯一主工單ID'].astype(str).str.strip().str.upper()
+    df_result['公分'] = df_result['公分'].fillna('N/A').astype(str)
     df_result["預計開工日"] = pd.to_datetime(df_result["預計開工日"], errors='coerce')
-    # 沒日期的週數給 W99
     df_result['排程週數'] = df_result['預計開工日'].dt.isocalendar().week.fillna(99).astype(int).apply(lambda x: f"W{x:02d}")
     df_result['原料材質'] = df_result['原料材質'].fillna('UNKNOWN').astype(str).str.strip()
     
-    # 只處理有效 ID
-    df_working = df_result[df_result['唯一主工單ID'].ne('') & df_result['唯一主工單ID'].notna()].copy()
-    df_working['刀次'] = df_working['刀次'].fillna(0)
+    # ----------------------------------------------------
+    # 2. 識別「已固定」與「待分配」工單
+    # ----------------------------------------------------
+    # 假設既有人員欄位名稱為 '人員'，若無此欄位則補空
+    if '人員' not in df_result.columns:
+        df_result['人員'] = np.nan
+
+    # 建立人員狀態 (記錄負荷與最後材質)
+    person_status = {p: {"capacity": 0, "last_part": None, "last_size": None} for p in personnel_list}
+
+    # 更新「已固定」工單的狀態到 person_status
+    fixed_mask = df_result['人員'].isin(personnel_list)
+    for _, row in df_result[fixed_mask].iterrows():
+        p = row['人員']
+        person_status[p]["capacity"] += pd.to_numeric(row['刀次'], errors='coerce') or 0
+        person_status[p]["last_part"] = row['原料材質']
+        person_status[p]["last_size"] = row['公分']
+
+    # ----------------------------------------------------
+    # 3. 群組化待分配工單
+    # ----------------------------------------------------
+    df_to_assign = df_result[~fixed_mask].copy()
     
-    # ----------------------------------------------------
-    # 步驟 2: 群組化 (以 ID 為核心)
-    # ----------------------------------------------------
-    def get_group_info(group: pd.DataFrame):
-        unique_sizes = sorted(group['尺寸公分'].unique())
-        unique_parts = sorted(group['原料材質'].unique())
+    def get_group_info(group):
+        gid = group['唯一主工單ID'].iloc[0]
         return pd.Series({
-            '尺寸指紋': '|'.join(unique_sizes), 
-            '原料材質指紋': '|'.join(unique_parts),
-            '群組刀次': group['刀次'].sum(), 
-            '排程週數': group['排程週數'].iloc[0]
+            '原料材質': group['原料材質'].iloc[0],
+            '尺寸指紋': '|'.join(sorted(group['公分'].unique())),
+            '總刀次': pd.to_numeric(group['刀次'], errors='coerce').sum(),
+            '週數': group['排程週數'].iloc[0],
+            '優先權': 0 if gid.startswith('81B') else 1
         })
 
-    group_info = df_working.groupby(['唯一主工單ID']).apply(get_group_info).reset_index()
-    
-    # ----------------------------------------------------
-    # 步驟 3: 核心分配邏輯
-    # ----------------------------------------------------
-    assigned_groups_map: Dict[str, str] = {} 
-    # 初始化負荷計數
-    person_status = {p: {"capacity": 0, "fingerprint": None, "part_fingerprint": None, "week": None} for p in personnel_list}
+    group_info = df_to_assign.groupby('唯一主工單ID').apply(get_group_info).reset_index()
 
-    # --- 第一波：81B 歸 A159 ---
+    # ⭐ 關鍵排序：週數(交期) > 原料材質(集中生產) > 優先權(81B) > 尺寸
+    group_info.sort_values(
+        by=['週數', '原料材質', '優先權', '尺寸指紋'],
+        ascending=[True, True, True, True],
+        inplace=True
+    )
+
+    # ----------------------------------------------------
+    # 4. 分配邏輯：以「材質集中」為目標
+    # ----------------------------------------------------
+    assigned_map = {}
+
     for _, row in group_info.iterrows():
         gid = row['唯一主工單ID']
-        if gid.startswith('81B'):
-            assigned_groups_map[gid] = "A159"
-            person_status["A159"]["capacity"] += row['群組刀次']
-            debug_log[gid] = {'指派類型': '81B強制專任', '人員': 'A159'}
-
-    # --- 第二波：其餘所有工單 (不論原本是誰做的) 通通分給 A830 & B201 ---
-    to_assign_81A = group_info[~group_info['唯一主工單ID'].isin(assigned_groups_map)].copy()
-    #to_assign_81A['聚類鍵'] = to_assign_81A['排程週數'] + '-' + to_assign_81A['尺寸指紋']
-    #to_assign_81A.sort_values(by=['聚類鍵', '群組刀次'], ascending=[True, False], inplace=True)
-
-    to_assign_81A.sort_values(by=['排程週數', '原料材質指紋', '尺寸指紋', '群組刀次'],
-                              ascending=[True, True, True, False], inplace=True)
-
-    for _, row in to_assign_81A.iterrows():
-        gid = row['唯一主工單ID']
-        dose = row['群組刀次']
-        current_fp = row['尺寸指紋']
-        current_part_fp = row['原料材質指紋']
-        current_wk = row['排程週數']
+        m_part = row['原料材質']
+        m_size = row['尺寸指紋']
+        m_dose = row['總刀次']
         
-        # ⭐ 候選名單絕對排除 A159，只讓這兩位去分
-        candidates = ["A830", "B201"]
         best_person = None
+        logic = ""
 
-        # 相似性匹配
-        for p in candidates:
-            # 必須是同週
-            if person_status[p]["week"] == current_wk:
-                # 優先權 1 & 2: 同材質優先 (因為 sort 過，同尺寸會連在一起)
-                if person_status[p]["part_fingerprint"] == current_part_fp:
-                    best_person = p
-                    logic = '同材質相似匹配'
-                    break
-                # 優先權 3: 同尺寸 (不同材質)
-                elif person_status[p]["fingerprint"] == current_fp:
-                    best_person = p
-                    logic = '同尺寸相似匹配'
-                    break
+        # A. 優先找「正在做這種料」的人 (維持材質連續性)
+        # 依照負荷排序，讓相同材質盡量塞給同一個人，直到他太忙
+        eligible_people = sorted(personnel_list, key=lambda p: person_status[p]["capacity"])
         
-        # 負荷平衡
+        for p in eligible_people:
+            if person_status[p]["last_part"] == m_part:
+                best_person = p
+                logic = "材質集中化分配"
+                break
+        
+        # B. 如果沒人在做這種料，給目前最閒的人
         if not best_person:
-            best_person = sorted(candidates, key=lambda p: person_status[p]["capacity"])[0]
-            logic = '負荷平衡'
+            best_person = eligible_people[0]
+            logic = "負荷平衡分配"
 
-        assigned_groups_map[gid] = best_person
-        person_status[best_person]["capacity"] += dose
-        person_status[best_person]["fingerprint"] = current_fp
-        person_status[best_person]["week"] = current_wk
-        debug_log[gid] = {'指派類型': f'81A自動分配({logic})', '人員': best_person}
+        # 更新狀態
+        assigned_map[gid] = best_person
+        person_status[best_person]["capacity"] += m_dose
+        person_status[best_person]["last_part"] = m_part
+        person_status[best_person]["last_size"] = m_size
+        debug_log[gid] = {"分配理由": logic, "執行人員": best_person}
 
     # ----------------------------------------------------
-    # 步驟 4: 回寫並確保無 None
+    # 5. 回寫
     # ----------------------------------------------------
-    df_result['人員'] = df_result['唯一主工單ID'].map(assigned_groups_map)
-    
-    # 如果 map 完還有 None，代表有些工單 ID 沒在 df_working 裡面 (可能沒ID或是被過濾)
-    # 這裡強迫剩下的如果不是 81B，就隨機填給 B201 作為墊底防禦 (避免 None 遺失)
-    df_result.loc[df_result['人員'].isna(), '人員'] = 'B201' 
+    for gid, p in assigned_map.items():
+        df_result.loc[df_result['唯一主工單ID'] == gid, '人員'] = p
 
-    # 清理輔助欄位
-    df_result.drop(columns=['尺寸公分', '排程週數', '原料材質指紋'], inplace=True, errors='ignore')
-
-    print(f"--- 分配完畢 ---")
-    print(f"A159 (81B 專員) 總刀次: {person_status['A159']['capacity']}")
-    print(f"A830 (81A 負責) 總刀次: {person_status['A830']['capacity']}")
-    print(f"B201 (81A 負責) 總刀次: {person_status['B201']['capacity']}")
-    
     return df_result, debug_log
 
 
@@ -5661,6 +5636,99 @@ def highlight_needs_supplement(val):
     return None # Styler 接受 None 作為無樣式
 
 
+def schedule_daily_reset(df_A830, df_B201, df_A159):
+    """
+    雙向磁鐵優化邏輯：
+    1. 向上銜接：將與「昨日結尾」相同的原料工單移至「今日開頭」。
+    2. 向下銜接：將與「明日首筆」相同的原料工單移至「今日末尾」。
+    3. 日內歸類：中間剩餘工單，相同原料必須聚合在一起。
+    """
+    machines = {"A830": df_A830, "B201": df_B201, "A159": df_A159}
+    optimized_machines = {}
+
+    for name, df in machines.items():
+        if df is None or df.empty:
+            optimized_machines[name] = df
+            continue
+
+        df = df.copy()
+        df['預計開工日'] = pd.to_datetime(df['預計開工日']).dt.normalize()
+        df['原料材質'] = df['原料材質'].fillna('').astype(str).str.strip()
+        df['主工單編號'] = df['主工單編號'].fillna('').astype(str).str.strip()
+
+        all_dates = sorted(df['預計開工日'].unique())
+        final_df_list = []
+        last_day_tail_material = None # 紀錄前一天的結尾原料
+
+        for i in range(len(all_dates)):
+            curr_date = all_dates[i]
+            curr_day_df = df[df['預計開工日'] == curr_date].copy().reset_index(drop=True)
+            
+            if curr_day_df.empty:
+                continue
+
+            # 取得當天主工單清單與原料對照
+            master_order = list(dict.fromkeys(curr_day_df['主工單編號'].tolist()))
+            master_to_material = curr_day_df.drop_duplicates('主工單編號').set_index('主工單編號')['原料材質'].to_dict()
+
+            # --- 鎖定頭尾目標 ---
+            head_mat = last_day_tail_material # 銜接昨天的目標
+            tail_mat = None # 銜接明天的目標
+            
+            if i + 1 < len(all_dates):
+                next_day = df[df['預計開工日'] == all_dates[i+1]]
+                valid_next = next_day[next_day['主工單編號'] != ""]
+                if not valid_next.empty:
+                    tail_mat = valid_next.iloc[0]['原料材質']
+
+            # --- 分配群組 ---
+            # 1. 頭部群組 (接昨天)
+            head_masters = []
+            if head_mat:
+                head_masters = [m for m in master_order if master_to_material[m] == head_mat]
+            
+            # 2. 尾部群組 (接明天，且不與頭部重複)
+            tail_masters = []
+            if tail_mat:
+                # 若頭尾原料相同，該原料會被歸在 head_masters，這裡就不重複抓
+                tail_masters = [m for m in master_order if master_to_material[m] == tail_mat and m not in head_masters]
+
+            # 3. 中間群組 (其餘工單，執行日內歸類)
+            remaining_masters = [m for m in master_order if m not in head_masters and m not in tail_masters]
+            
+            mid_masters = []
+            seen_mats = {head_mat, tail_mat} # 已處理過的原料不再重複聚合
+            for m_id in remaining_masters:
+                mat = master_to_material[m_id]
+                if mat not in seen_mats:
+                    same_mat_list = [m for m in remaining_masters if master_to_material[m] == mat]
+                    mid_masters.extend(same_mat_list)
+                    seen_mats.add(mat)
+                elif mat == "": # 處理無原料材質的特殊情況
+                    mid_masters.append(m_id)
+
+            # --- 合成新順序 ---
+            final_order = head_masters + mid_masters + tail_masters
+            
+            # 避免遺漏（保險機制：若有主工單沒被分到類，補在中間）
+            missing = [m for m in master_order if m not in final_order]
+            if missing:
+                final_order = head_masters + mid_masters + missing + tail_masters
+
+            # 根據新順序重組資料
+            curr_day_df = pd.concat([curr_day_df[curr_day_df['主工單編號'] == m] for m in final_order], ignore_index=True)
+            
+            # 紀錄今天的結尾，給明天當頭
+            if not curr_day_df.empty:
+                last_day_tail_material = curr_day_df.iloc[-1]['原料材質']
+
+            final_df_list.append(curr_day_df)
+
+        optimized_machines[name] = pd.concat(final_df_list, ignore_index=True)
+
+    return optimized_machines["A830"], optimized_machines["B201"], optimized_machines["A159"]
+
+
 
 def main():
 
@@ -5856,14 +5924,19 @@ def main():
 
     # 嘉真需求2 加上預計入庫日 以及 開工數量 等等
     A830_part_end, B201_part_end, A159_part_end = Erin_use2(A830_part_end, B201_part_end, A159_part_end, break_dates)
-    
+
     # 最後防呆 確認數量 不可有少 可多
     result_check = check_Qty(A830_part_end, B201_part_end, A159_part_end)
     print(result_check)
 
+    A830_new, B201_new, A159_new = schedule_daily_reset(A830_part_end, B201_part_end, A159_part_end)
+
+    result_check = check_Qty(A830_new, B201_new, A159_new)
+    print(result_check)
+
     # 最後81B三班制分類
 
-    A830_new, B201_new, A159_new = apply_final_rotation(A830_part_end, B201_part_end, A159_part_end)
+    #A830_new, B201_new, A159_new = apply_final_rotation(A830_part_end, B201_part_end, A159_part_end)
     
     # ==============================================================================================================
     # === 寫入 Excel ===
