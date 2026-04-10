@@ -70,7 +70,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-#print = block_print
+print = block_print
 
 def universal_excel_loader(file_path):
     # 1. 取得絕對路徑（Excel COM 元件要求必須是絕對路徑）
@@ -300,7 +300,7 @@ def process_schedule_data():
     #base_df = pd.read_excel(base_path, dtype=str)
 
     # 過濾條件
-    order_df = order_df[~order_df["工單號碼"].str.startswith(("81R", "81T"))]
+    order_df = order_df[~order_df["工單號碼"].str.startswith(("81R", "81T", "81B"))]
     #order_df = order_df[order_df["工單號碼"].str.startswith(("81A"))]
     order_df = order_df[order_df["狀態"].str.lower() == "released"] 
     order_df = choose_date(order_df)  # 假設 choose_date 已定義
@@ -451,38 +451,111 @@ def process_schedule_data():
             
             if not matched_rows.empty:
                 target_order = matched_rows.iloc[0]
-                
-                # 🌟 取得雙方的單一寬度
-                a_width = float(target_order.get("寬度Cm", 0))
-                c_width = float(c_order.get("寬度Cm", 0))
-                print(f"   🔎 進入精確配對(備註)：目標 {pair_order_id}(單寬:{a_width}) 搭配 {c_id}(單寬:{c_width})")
+
+                c_material = str(c_order.get("原料材質", "")).strip()
+                t_material = str(target_order.get("原料材質", "")).strip()
+                c_item_no = str(c_order.get("料號", "")).strip()
+                t_item_no = str(target_order.get("料號", "")).strip()
+
+                if c_material != t_material:
+                    print(f" [跳過備註]{c_id} 與 {pair_order_id} 原料材質不符 ({c_material} vs {t_material})")
+                    continue
+
+                std_match = base_df[(base_df["料號"] == t_item_no) & ((base_df['搭1料號'] == c_item_no) | (base_df['搭2料號'] == c_item_no))]
 
                 best_match = None
-                min_diff = 999  # 用來記錄最小誤差
+                best_penalty = 999
 
-                # 同時測試 88 與 68，尋找誤差最小的組合
-                for target_size in [88, 68]:
-                    for a_cars in range(1, 17):
-                        for c_cars in range(1, 17):
-                            total_cm = (a_width * a_cars) + (c_width * c_cars)
-                            diff = abs(total_cm - target_size)
-                            
-                            # 如果這個組合比之前找過的都更準 (且在 1cm 寬限內)
-                            if diff <= 1 and diff < min_diff:
-                                min_diff = diff
-                                best_match = {
-                                    "a_cars": a_cars,
-                                    "c_cars": c_cars,
-                                    "total": total_cm,
-                                    "target": target_size,
-                                    "diff": diff
-                                }
-                                # 如果已經 0 誤差，就是最完美組合，直接跳出迴圈
-                                if diff == 0: break
-                        if best_match and best_match["diff"] == 0: break
-                    if best_match and best_match["diff"] == 0: break
+                if not std_match.empty:
+                    # 模式 A: 找到標準，直接取值
+                    row = std_match.iloc[0]
+                    a_cars = float(row.get('車數', 0))
+                    
+                    # 判斷 c_item 是搭1還是搭2
+                    if str(row.get('搭1料號', '')).strip() == c_item_no:
+                        c_cars = float(row.get('搭1產出車數', 0))
+                    else:
+                        c_cars = float(row.get('搭2產出車數', 0))
 
-                # 檢查最後是否有找到符合條件的組合
+                    a_width = float(target_order.get("寬度Cm", 0))
+                    c_width = float(c_order.get("寬度Cm", 0))
+                    total_cm = (a_width * a_cars) + (c_width * c_cars)
+
+                    best_match = {
+                        "a_cars": a_cars, "c_cars": c_cars, "total": total_cm, 
+                        "target": "base_df", "diff": 0, "status": "標準配對"
+                    }
+                    best_penalty = 0
+                    print(f"   📘 [標準模式] {c_id} 備註配對 {pair_order_id}：使用 base_df 標準車數 ({a_cars}車:{c_cars}車)")
+
+                else:
+                
+                    print(f"   🔍 [自算模式] base_df 無此組合，開始計算最佳車數...")
+                    a_width = float(target_order.get("寬度Cm", 0))
+                    c_width = float(c_order.get("寬度Cm", 0))
+
+                    # 規則：兩者大小不可以差一倍以上 (即較大值除以較小值必須 <= 2)
+                    width_ratio = max(a_width, c_width) / min(a_width, c_width) if min(a_width, c_width) > 0 else 999
+                    
+                    if width_ratio > 2:
+                        print(f"   ⚠️ [跳過配對] 寬度差異過大：{a_width}cm vs {c_width}cm (比例 {width_ratio:.2f} > 2.0)")
+                        continue 
+
+                    a_qty = int(target_order.get("開工數量", 1))
+                    c_qty = int(c_order.get("開工數量", 1))
+                
+                    # 修改點 1: 根據品號強制分流規格
+                    # 假設你的品號欄位名稱是 "品號"，請確保名稱正確
+                    a_item_no = str(target_order.get("料號", ""))
+                    if "B110A" in a_item_no:
+                        possible_targets = [68]
+                        spec_msg = "強制 68cm (B110A)"
+                    else:
+                        possible_targets = [88] 
+                        spec_msg = "一般規格 88cm"
+
+                    print(f"   🔎 進入精確配對(備註)：目標 {pair_order_id}(單寬:{a_width}, 需求:{a_qty})")
+                    print(f"      規格限制: {spec_msg}")
+
+                    
+                    min_diff = 999 
+                    max_a_cars = -1 
+
+                    # 🛠️ 修改點 2: 遍歷鎖定的規格
+                    for target_size in possible_targets:
+                        for a_cars in range(1, 17):
+                            for c_cars in range(1, 17):
+                                total_cm = (a_width * a_cars) + (c_width * c_cars)
+                                diff = abs(total_cm - target_size)
+                                
+                                if diff <= 1:
+                                    # 核心：整除性檢查 (Penalty)
+                                    remainder_a = (a_qty / a_cars) % 1
+                                    # 判斷是否接近整數 (0 或 1)
+                                    penalty = 0 if (abs(remainder_a) < 0.001 or abs(remainder_a - 1) < 0.001) else 1
+                                    
+                                    # 修改點 3: 綜合評分判斷 (整除 > 誤差 > 車數)
+                                    is_better_penalty = (penalty < best_penalty)
+                                    is_same_penalty = (penalty == best_penalty)
+                                    is_better_diff = (diff < min_diff - 0.001)
+                                    is_same_diff = (abs(diff - min_diff) <= 0.001)
+
+                                    if is_better_penalty or \
+                                    (is_same_penalty and is_better_diff) or \
+                                    (is_same_penalty and is_same_diff and a_cars > max_a_cars):
+                                        
+                                        best_penalty = penalty
+                                        min_diff = diff
+                                        max_a_cars = a_cars
+                                        best_match = {
+                                            "a_cars": a_cars,
+                                            "c_cars": c_cars,
+                                            "total": total_cm,
+                                            "target": target_size,
+                                            "diff": diff,
+                                            "ratio": a_cars / c_cars
+                                        }
+                    
                 if best_match:
                     a_cars = best_match["a_cars"]
                     c_cars = best_match["c_cars"]
@@ -490,10 +563,8 @@ def process_schedule_data():
                     t_copy = target_order.copy()
                     c_copy = c_order.copy()
                     
-                    # 更新雙方參數
                     t_copy["車數"] = a_cars
                     t_copy["總長度(cm)"] = a_width * a_cars
-                    
                     c_copy["車數"] = c_cars
                     c_copy["總長度(cm)"] = c_width * c_cars
                     c_copy["刀次"] = 0 
@@ -501,10 +572,11 @@ def process_schedule_data():
                     pair_rows_remark.extend([t_copy, c_copy])
                     used_order_ids.update([c_id, pair_order_id])
                     
-                    print(f"   ✅ [成功] 最優組合: {pair_order_id}({a_cars}車) + {c_id}({c_cars}車) = {best_match['total']}cm (目標:{best_match['target']}, 誤差:{best_match['diff']:.2f})")
+                    status = "完美整除" if best_penalty == 0 else "非整除組合"
+                    print(f"   ✅ [成功] {status}: {a_cars}車:{c_cars}車 (目標:{best_match['target']}cm)")
+                    print(f"      寬度: {best_match['total']}cm (誤差:{best_match['diff']:.2f})")
                 else:
-                    print(f"   ❌ [失敗] 1-16 車交叉比對誤差皆 > 1cm")
-                    print(f"      👉 單寬資料：A={a_width} / C={c_width}")
+                    print(f"   ❌ [失敗] 1-16 車交叉比對誤差皆 > 1cm 或不符規格")
             else:
                 print(f"   ❓ [找不到] 目標 {pair_order_id} 不在剩餘池中。")
 
@@ -2045,12 +2117,23 @@ def remaining_cut_clean_and_repair(df_paired_split, df, order_df, mode="88cm", c
                 
                 if row_i["品號結尾"] != row_j["品號結尾"]: continue
 
+                # --- 寬度比例攔截邏輯 ---
+                w_i = float(row_i.get("公分", 0))
+                w_j = float(row_j.get("公分", 0))
+                
+                # 避免除以 0，並計算大除以小
+                if w_i > 0 and w_j > 0:
+                    w_ratio = max(w_i, w_j) / min(w_i, w_j)
+                    if w_ratio > 2:
+                        # 比例超過 2 倍，直接跳過
+                        continue 
+                # ---------------------------------------
+
                 res = find_func(row_i, row_j)
                 if res:
                     ci, cj = res
                     
-                    # 🌟 計算刀次：使用 raw_qty_i 確保基準正確
-                    # 加上 round(..., 2) 徹底解決 60.000000001 的問題
+                    # 計算刀次：使用 raw_qty_i 確保基準正確
                     main_cut = math.ceil(round(raw_qty_i, 2) / ci) if ci > 0 else 0
 
                     print(f"\n🔍 [DEBUG 配對校準]")
