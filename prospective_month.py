@@ -5807,7 +5807,13 @@ def schedule_daily_reset(df_A830, df_B201, df_A159):
 
             final_df_list.append(curr_day_df)
 
-        optimized_machines[name] = pd.concat(final_df_list, ignore_index=True)
+        # 合併結果
+        result_df = pd.concat(final_df_list, ignore_index=True)
+        
+        # --- 格式修正核心：轉成純日期物件 ---
+        result_df['預計開工日'] = result_df['預計開工日'].dt.date
+        
+        optimized_machines[name] = result_df
 
     return optimized_machines["A830"], optimized_machines["B201"], optimized_machines["A159"]
 
