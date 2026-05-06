@@ -40,7 +40,7 @@ import pythoncom
 from typing import List, Dict, Any, Tuple
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import PatternFill, Font
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from datetime import datetime, timedelta, date, time
 from collections import defaultdict
 import warnings
@@ -52,10 +52,8 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=DeprecationWarning)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-# 針對那個 Downcasting 的特定設定
-#pd.set_option('future.no_silent_downcasting', True)
 
-global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, week_81B_user
+global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, completion_map
 
 
 GLOBAL_ORDER_QTY_MAP = {}  # {工單號碼: 剩餘開工數量}
@@ -109,7 +107,6 @@ def universal_excel_loader(file_path):
         # 刪除暫存檔
         os.remove(temp_xlsx)
         print("✅ 強制修復轉檔成功！")
-
         return df
 
     except Exception as e:
@@ -152,9 +149,9 @@ def load_schedule_history(config: Dict[str, Any]) -> pd.DataFrame:
     df_history = pd.DataFrame()
     
     # 讀取 JSON 配置的歷史檔案路徑
-    SCHEDULE_HISTORY_FILE = config.get("schedule_history_path_old")
+    SCHEDULE_HISTORY_FILE = config.get("schedule_history_path")
     if not SCHEDULE_HISTORY_FILE:
-        print("警告: config_ribbon.json 缺少 'schedule_history_path_old' 配置。")
+        print("警告: config_ribbon.json 缺少 'schedule_history_path' 配置。")
         return df_history
         
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -184,7 +181,6 @@ def load_schedule_history(config: Dict[str, Any]) -> pd.DataFrame:
         
     return df_history
 
-
 def get_holiday_multiplier_map(holiday_list):
     if not holiday_list:
         return {}
@@ -212,7 +208,7 @@ def get_holiday_multiplier_map(holiday_list):
             h_s = datetime.fromisoformat(period['start'])
             h_e = datetime.fromisoformat(period['end'])
             
-            # 判斷「當天」是否與「請假區間」有交集
+            # 💡 關鍵修正：判斷「當天」是否與「請假區間」有交集
             # 只要請假的開始點在當天結束前，且結束點在當天開始後，就有交集
             day_start = datetime.combine(curr_date, time(0, 0))
             day_end = datetime.combine(curr_date, time(23, 59, 59))
@@ -236,11 +232,10 @@ def get_holiday_multiplier_map(holiday_list):
     return multiplier_map
 
 
-
 def process_schedule_data():
     # 讓使用者選擇排程資料 Excel
 
-    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, week_81B_user
+    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, completion_map
 
     # 載入json設定
     script_dir = os.path.dirname(os.path.abspath(__file__)) 
@@ -253,7 +248,7 @@ def process_schedule_data():
     with open(user_path, "r", encoding="utf-8") as f:
         config_user = json.load(f)
  
-    
+
     db_config = config.get("db_config")
     if not db_config:
         print("❌ config_ribbon.json 缺少 db_config 設定")
@@ -269,7 +264,6 @@ def process_schedule_data():
         print(f"❌ 從資料庫讀取基本資料失敗: {e}")
         return
     
-    
     # 將user輸入的資料載入global變數內
     start_date_str = config_user.get("start_range")
     start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
@@ -283,8 +277,6 @@ def process_schedule_data():
     schedule_start_date_str = config_user.get("start_date")
     schedule_start_date = datetime.strptime(schedule_start_date_str, "%Y-%m-%d")
 
-    week_81B_user = config_user.get("week_81B_user")
-
     file_path = config_user.get("uploaded_file")
     print(start_date)
     print(end_date)
@@ -292,7 +284,7 @@ def process_schedule_data():
     print(schedule_start_date)
     print(file_path)
 
-    base_path = config.get("base_path")
+    base_path = config_user.get("base_path")
 
     # 讀取資料
     #order_df = pd.read_excel(file_path, dtype=str)
@@ -300,7 +292,7 @@ def process_schedule_data():
     #base_df = pd.read_excel(base_path, dtype=str)
 
     # 過濾條件
-    order_df = order_df[~order_df["工單號碼"].str.startswith(("81R", "81T", "81B"))]
+    order_df = order_df[~order_df["工單號碼"].str.startswith(("81R", "81T"))]
     #order_df = order_df[order_df["工單號碼"].str.startswith(("81A"))]
     order_df = order_df[order_df["狀態"].str.lower() == "released"] 
     order_df = choose_date(order_df)  # 假設 choose_date 已定義
@@ -345,10 +337,86 @@ def process_schedule_data():
     df = merged.copy()
     df_history = load_schedule_history(config)
 
+    # --- 1. 資料庫同步 ---
+    completion_map = {}
+    target_orders = df['工單號碼'].unique().tolist()
+    if target_orders:
+        orders_placeholder = "('" + "','".join(map(str, target_orders)) + "')"
+        print(orders_placeholder)
+        try:
+            conn = mysql.connector.connect(**db_config)
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            sql_query = f"""
+                SELECT 
+                    T.wo_SN_clean,
+                    T.庫存完工量_wo,
+                    T.庫存完工量_pt,
+                    T.原本庫存量,
+                    T.裁切不良品,
+                    GREATEST(
+                        IFNULL(T.庫存完工量_pt, 0), 
+                        IFNULL(T.庫存完工量_wo, 0), 
+                        IFNULL(T.原本庫存量, 0)
+                    ) as 庫存完工量,
+                    T.額外調整量
+                FROM (
+                    -- 內層：先把所有需要的加總算出來
+                    SELECT 
+                        A.wo_SN AS wo_SN_clean, 
+                        SUM(IFNULL(A.wo_pt_good, 0) + IFNULL(A.wo_pt_fail, 0)) as 庫存完工量_wo,
+                        SUM(IFNULL(A.pt_report_good, 0) + IFNULL(A.pt_report_fail, 0)) as 庫存完工量_pt,
+                        IFNULL(SUM(A.wo_ForceProNum), 0) as 原本庫存量,
+                        IFNULL(B_Sub.total_good, 0) as 額外調整量,
+                        IFNULL(SUM(A.wo_pt_fail), 0) as 裁切不良品
+                    FROM workorder A
+                    LEFT JOIN (
+                        SELECT wo_SN, SUM(amount_good) as total_good
+                        FROM packageaction
+                        WHERE action = 'warehouse_bepaired'
+                        AND wo_SN IN {orders_placeholder}
+                        GROUP BY wo_SN
+                    ) B_Sub ON A.wo_SN = B_Sub.wo_SN
+                    WHERE A.wo_SN IN {orders_placeholder}
+                    AND A.wo_ForceSDate <= '{today_str}'
+                    GROUP BY A.wo_SN
+                ) AS T
+            """
+            db_df = pd.read_sql(sql_query, conn).fillna(0)
+            conn.close()
+            print("\n資料庫回傳的原始內容：")
+            print(db_df)
+
+            # --- 強力清洗 A：資料庫回傳的資料 ---
+            db_df['wo_SN_clean'] = db_df['wo_SN_clean'].astype(str).str.strip().str.upper() # 轉大寫且去空格
+            db_df = db_df.rename(columns={'wo_SN_clean': '工單號碼'})
+            # 確保資料庫回傳只有一筆（防止產生重複行）
+            db_df = db_df.groupby('工單號碼', as_index=False).sum()
+
+            # --- 強力清洗 B：主表資料 ---
+            df['工單號碼'] = df['工單號碼'].astype(str).str.strip().str.upper() # 轉大寫且去空格
+            
+            # 移除可能導致衝突的舊欄位
+            df = df.drop(columns=['庫存完工量', '額外調整量'], errors='ignore')
+
+            # --- 執行合併 ---
+            df = df.merge(db_df, on='工單號碼', how='left')
+
+            # --- 補零與計算 ---
+            df['裁切不良品'] = pd.to_numeric(df['裁切不良品'], errors='coerce').fillna(0)
+            df['庫存完工量'] = pd.to_numeric(df['庫存完工量'], errors='coerce').fillna(0)
+            df['額外調整量'] = pd.to_numeric(df['額外調整量'], errors='coerce').fillna(0)
+            df['開工數量'] = (pd.to_numeric(df['開工數量'], errors='coerce').fillna(0) - (df['庫存完工量'] + df['額外調整量'])).clip(lower=0)
+            df['完工數量'] = (df['庫存完工量'] + df['額外調整量']).clip(lower=0)
+            completion_map = dict(zip(df['工單號碼'], df['完工數量']))
+
+        except Exception as e:
+            print(f"❌ 資料庫同步失敗: {e}")
+
+
+
+    # --- 2. 處理歷史資料 (獨立區塊) ---
     if not df_history.empty:
         print("歷史資料載入...")
-
-        # 統一欄位名稱
         df_history = df_history.rename(columns={'工單編號': '工單號碼', '品號': '料號'})
         for col in ['工單號碼', '料號']:
             if col in df_history.columns:
@@ -356,67 +424,35 @@ def process_schedule_data():
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip()
 
-        # 數值欄位
         if '預估良品數' in df_history.columns:
             df_history['預估良品數'] = pd.to_numeric(df_history['預估良品數'], errors='coerce').fillna(0)
-        df['開工數量'] = pd.to_numeric(df['開工數量'], errors='coerce').fillna(0)
-        df['完工數量'] = pd.to_numeric(df['完工數量'], errors='coerce').fillna(0)
 
-        # 歷史已排數量
         df_history_used_qty = df_history.groupby(['工單號碼', '料號'], as_index=False)['預估良品數'].sum()
         df_history_used_qty = df_history_used_qty.rename(columns={'預估良品數': '昨日已排數量'})
         df = df.merge(df_history_used_qty, on=['工單號碼', '料號'], how='left').fillna(0)
 
-        # ------------------------------------------------------------------
-        # ⭐ 修正：使用 np.maximum 確保用最大已處理數量來扣減
-        # ------------------------------------------------------------------
-        # 1. 找出最大已完成/已排量
-        df['最大已處理數量'] = np.maximum(df['完工數量'], df['昨日已排數量'])
-        
-        # 2. 扣除數量：用原始開工數量減去最大已處理數量，並確保不小於 0
-        df['開工數量'] = (df['開工數量'] - df['最大已處理數量']).clip(lower=0)
-        
-        # 3. 準備列印資訊
-        # 將 '最大已處理數量' 暫存為 '昨日已排數量' 以便列印原開工數量
-        df['昨日已排數量_PRINT'] = df['最大已處理數量']
-        df.drop(columns=['最大已處理數量'], errors='ignore', inplace=True)
-        
-        # ------------------------------------------------------------------
+    # --- 3. 過濾與清理 (移出歷史資料區塊) ---
+    
+    # 先定義 completed_orders
+    completed_orders = df[df['開工數量'] <= 0]['工單號碼'].unique().tolist()
 
-        # 列印明細
-        print("=== 扣除歷史數量後的工單明細 ===")
-        for _, row in df.iterrows():
-            # 由於我們已用最大值扣減，這裡計算原開工數量時使用 '昨日已排數量_PRINT'
-            print(f"工單: {row['工單號碼']}, 料號: {row['料號']}, "
-                  f"原開工數量: {row['開工數量'] + row['昨日已排數量_PRINT']}, "
-                  f"最大已處理: {row['昨日已排數量_PRINT']}, 剩餘: {row['開工數量']}")
-        
-        # 移除輔助列印欄位
-        df.drop(columns=['昨日已排數量', '昨日已排數量_PRINT'], errors='ignore', inplace=True)
+    # 移除完成工單 (保留剩餘數量 > 0 的)
+    df = df[df['開工數量'] > 0].copy()
 
-
-        # 已完成工單
-        completed_orders = df[df['開工數量'] <= 0]['工單號碼'].unique()
-        if len(completed_orders) > 0:
-            print("=== 已完成工單 ===")
-            print(completed_orders)
-
-        # 移除完成工單
-        df = df[df['開工數量'] > 0].copy()
-
-        # 排除備註引用已完成工單
-        if '備註' in df.columns:
-            def check_exclude(note):
-                if pd.isna(note):
-                    return False
-                note_prefix = str(note)[:8]
-                return note_prefix in completed_orders
-            df['exclude_by_note'] = df['備註'].apply(check_exclude)
-            excluded_count = df['exclude_by_note'].sum()
-            if excluded_count > 0:
-                print(f"排除 {excluded_count} 筆備註引用已完成工單的工單")
-            df = df[df['exclude_by_note'] == False].copy()
-            df.drop(columns=['exclude_by_note'], inplace=True)
+    # 排除備註引用已完成工單
+    if '備註' in df.columns and completed_orders:
+        def check_exclude(note):
+            if pd.isna(note):
+                return False
+            note_prefix = str(note)[:8].strip()
+            return note_prefix in completed_orders
+            
+        df['exclude_by_note'] = df['備註'].apply(check_exclude)
+        excluded_count = df['exclude_by_note'].sum()
+        if excluded_count > 0:
+            print(f"排除 {excluded_count} 筆備註引用已完成工單的工單")
+        df = df[df['exclude_by_note'] == False].copy()
+        df.drop(columns=['exclude_by_note'], inplace=True, errors='ignore')
 
     # === 更新全域工單數量 map ===
     update_global_order_qty_map(df)
@@ -445,7 +481,7 @@ def process_schedule_data():
         if match:
             pair_order_id = match.group(1)
             print(f"---")
-            print(f"🚩 發現備註任務：{c_id} 備註寫了 [{raw_remark}] -> 目標 ID: {pair_order_id}")
+            print(f" 發現備註：{c_id} 備註寫了 [{raw_remark}] -> 目標 ID: {pair_order_id}")
             
             matched_rows = merged[(merged["工單號碼"] == pair_order_id) & (~merged["工單號碼"].isin(used_order_ids))]
             
@@ -583,8 +619,9 @@ def process_schedule_data():
     # 2. 從總表中移除已被備註配走的人
     merged = merged[~merged["工單號碼"].isin(used_order_ids)].copy()
 
-    # -------------------------------
-    # 無須配對條件
+    # ==========================================================
+    # 接下來才跑你原本的無須配對與後續自動配對
+    # ==========================================================
     mask_no_pair = (
         merged["工單號碼"].str.startswith(("81A", "81B")) &
         (merged["搭1產出車數"] == 0) &
@@ -689,7 +726,7 @@ def process_schedule_data():
             main_copy = main_order.copy()
             
             # --------------------------
-            # 🌟 【重要修正點】校正主工單的車數、刀次和預估良品數 🌟
+            # 【重要修正點】校正主工單的車數、刀次和預估良品數 
             # --------------------------
             rule_row = cand["source_row"]
             try:
@@ -936,9 +973,12 @@ def process_schedule_data():
     # 格式化函式
     def format_df(df):
         if not isinstance(df, pd.DataFrame) or df.empty:
-            return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "原料材質", "餘量",
-                                         "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日"])
+            return pd.DataFrame(columns=["預計開工日", "人員", "工單編號", "品號", "原料材質", "裁切不良品", "餘量",
+                                        "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日", "完工數量"])
+        
         df = df.copy()
+        
+        # 1. 改名
         df.rename(columns={
             "開工日期": "預計開工日",
             "預計完工日期": "預計完工日",
@@ -946,19 +986,37 @@ def process_schedule_data():
             "料號": "品號",
             "開工數量": "預估良品數",
             "寬度Cm": "公分",
-            "客戶需求日期": "客戶需求日"
+            "客戶需求日期": "客戶需求日",
         }, inplace=True)
-        for col in ["公分", "預估良品數", "車數", "刀次"]:
-            if col in df.columns and isinstance(df[col], pd.Series):
+
+        # 2. 數字型態轉換與補 0
+        num_cols = ["公分", "預估良品數", "車數", "刀次", "完工數量", "裁切不良品"] # 🌟 加入裁切不良品
+        for col in num_cols:
+            if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-            elif col not in df.columns:
+            else:
                 df[col] = 0
-        for col in ["人員", "餘量", "生產註記"]:
+
+        # 3. 文字型態補空值
+        str_cols = ["人員", "餘量", "生產註記", "原料材質", "預計開工日", "預計完工日", "客戶需求日"]
+        for col in str_cols:
             if col not in df.columns:
                 df[col] = ""
-        df["餘量"] = df["預估良品數"]
-        return df[["預計開工日", "人員", "工單編號", "品號", "原料材質", "餘量",
-                   "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日"]]
+
+        # 特別處理餘量邏輯
+        if "預估良品數" in df.columns:
+            df["餘量"] = df["預估良品數"]
+
+        # 4. 最後提取欄位 (使用防呆選取)
+        final_cols = ["預計開工日", "人員", "工單編號", "品號", "原料材質", "裁切不良品", "餘量",
+                    "公分", "車數", "刀次", "預估良品數", "預計完工日", "生產註記", "客戶需求日", "完工數量"]
+        
+        # 檢查是否還有漏網之魚，如果 final_cols 裡還有 df 沒出現的欄位，自動補空
+        for col in final_cols:
+            if col not in df.columns:
+                df[col] = ""
+
+        return df[final_cols]
 
     remaining_df = format_df(remaining_df)
     no_pair_df = format_df(no_pair_df)
@@ -966,11 +1024,11 @@ def process_schedule_data():
         all_paired_df = format_df(all_paired_df)
 
     # 防呆 check paired_df內 是否有重複出現 譬如3722配3723 又有 3723配3722之類的
-    # 
 
     return {
         #"paired_df_88": paired_df_88,
         #"paired_df_68": paired_df_68,
+        'pair_rows_remark': pair_rows_remark,
         "paired_df_d1": paired_df_d1,
         "remaining_df": remaining_df,
         "no_pair_df": no_pair_df,
@@ -1502,7 +1560,7 @@ def process_schedule_data_second(order_df, base_df):
 
     # === 9️⃣ 欄位排序 ===
     output_columns = [
-        "預計開工日", "人員", "工單編號", "品號", "原料材質", "餘量",
+        "預計開工日", "人員", "工單編號", "品號", "原料材質", "裁切不良品", "餘量",
         "公分", "車數", "刀次", "預估良品數",
         "預計完工日", "生產註記", "客戶需求日"
     ]
@@ -1545,7 +1603,7 @@ def get_item_base(item_no):
 def pair_final_remaining(remaining, base_df, take_first_scheme_only=True):
 
     """
-    自動生成搭料子工單 (v3 版本)
+    自動生成搭料子工單 (v4 版本)
     ---------------------------------
     ✅ 子工單緊貼主工單 (A → A子 → B → B子)
     ✅ 子工單公分從 base_df 查搭料品號的寬度
@@ -2009,6 +2067,7 @@ def choose_date(df: pd.DataFrame) -> pd.DataFrame:
     global start_date, end_date, break_date_list, schedule_start_date
 
     df = df.copy()
+    #df["日期篩選用"] = pd.to_datetime(df["開工日期"], errors="coerce")
     df["日期篩選用"] = pd.to_datetime(df["客戶需求日期"], errors="coerce")
 
     # ✅ 若使用者未選擇日期就關閉，直接中止
@@ -2554,7 +2613,12 @@ def split_schedule_dates(df: pd.DataFrame) -> pd.DataFrame:
                     
                 new_rows.append(new_row)
 
-    return pd.DataFrame(new_rows)
+    result_df = pd.DataFrame(new_rows)
+    # 如果裡面有「實際排程日期」，把它改名回「預計開工日」，這樣後續程式才接得到
+    if "實際排程日期" in result_df.columns:
+        result_df = result_df.rename(columns={"實際排程日期": "預計開工日"})
+    
+    return result_df
 
 
 
@@ -2672,7 +2736,7 @@ def final_doAssignAndSort_DEBUG(df_paired_split, df_no_pair_split, df_no_pair_se
     # 轉型 base_df 數值欄位
     try:
         # === 建立 料號 -> 原始車數 的對應表 (供還原時使用) ===
-        # ⭐ 關鍵修正：篩選出搭1料號為空（None/NaN/空字串）的行，這才是該料號的自產基本配置。
+        # 篩選出搭1料號為空（None/NaN/空字串）的行，這才是該料號的自產基本配置。
         # 由於 '搭1料號' 可能是字串，使用 .fillna('') 或 .isna() 進行判斷
         base_df_for_restore = base_df[
             (base_df['搭1料號'].isna()) | (base_df['搭1料號'] == '') | (base_df['搭1料號'].str.strip().eq(''))
@@ -2749,9 +2813,6 @@ def final_doAssignAndSort_DEBUG(df_paired_split, df_no_pair_split, df_no_pair_se
                     if paired_found: break
                     if df_src_ref.empty: continue
                         
-                    match_in_df = df_src_ref[df_src_ref["品號"] == target_code].copy()
-                    if match_in_df.empty: continue
-                        
                     #2修正點#
                     match_in_df = df_src_ref[
                         (df_src_ref["品號"] == target_code) & 
@@ -2802,7 +2863,7 @@ def final_doAssignAndSort_DEBUG(df_paired_split, df_no_pair_split, df_no_pair_se
                         paired_main_row["餘量"] = main_alloc_qty
                         paired_main_row["刀次"] = main_cut_count_paired
                         paired_main_row["車數"] = main_car_count
-                        # ⭐ 新增來源標註
+                        #  新增來源標註
                         paired_main_row["來源類型"] = "NEWLY_PAIRED_MAIN"
                         
                         # 子工單新增項
@@ -2811,7 +2872,7 @@ def final_doAssignAndSort_DEBUG(df_paired_split, df_no_pair_split, df_no_pair_se
                         paired_sub_row["餘量"] = alloc_qty
                         paired_sub_row["刀次"] = 0
                         paired_sub_row["車數"] = sub_car_count
-                        # ⭐ 新增來源標註
+                        #  新增來源標註
                         paired_sub_row["來源類型"] = "NEWLY_PAIRED_SUB"
                         
                         newly_paired_rows.extend([paired_main_row, paired_sub_row])
@@ -3419,6 +3480,8 @@ def merge_same_day_orders_multi(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(recalculated)
 
 
+
+
 def safe_int_conversion(value: Any, default: int = 0) -> int:
     """
     安全地將值轉換為整數。處理 None, NaN, 空字串等情況，避免 ValueError。
@@ -3808,6 +3871,112 @@ def Erin_use2(A830_df, B201_df, A159_df, holiday_maps):
     return results[0], results[1], results[2]
 
 
+def Erin_use3(A830_df, B201_df, A159_df):
+    
+    global completion_map
+
+    script_dir = os.path.dirname(os.path.abspath(__file__)) 
+    user_path = os.path.join(script_dir, "E:/ribbon_schedule/test_report_upload/json/config_data.json")
+    
+    with open(user_path, "r", encoding="utf-8") as f:
+        config_user = json.load(f)
+    3
+    file_path = config_user.get("uploaded_file")
+    
+    # --- 修改點：讀取時確保不產生亂碼 ---
+    #order_df = pd.read_excel(file_path, dtype=str)
+    order_df = universal_excel_loader(file_path)
+    
+    # 這裡印出來檢查，如果看到亂碼，我們就用索引(Index)來取欄位
+    print("Excel 原始欄位清單:", order_df.columns.tolist())
+
+    # --- 防呆處理：如果欄位名稱亂碼，強迫重新命名 ---
+    # 假設第一欄是工單號碼，第二欄是開工數量（請依你 Excel 實際順序調整）
+    # 或者用 .str.contains 模糊尋找
+    target_col = [c for c in order_df.columns if "工單號碼" in str(c)]
+    qty_col = [c for c in order_df.columns if "開工數量" in str(c)]
+    
+    if target_col and qty_col:
+        order_df = order_df.rename(columns={target_col[0]: '工單號碼', qty_col[0]: '開工數量'})
+    else:
+        print("⚠️ 找不到指定欄位名稱，嘗試使用位置索引命名")
+        order_df.columns.values[0] = "工單號碼" 
+        order_df.columns.values[11] = "開工數量" 
+
+    order_df = order_df[['工單號碼', '開工數量']].copy()
+    order_df['工單號碼'] = order_df['工單號碼'].astype(str).str.strip()
+    order_df['開工數量'] = pd.to_numeric(order_df['開工數量'], errors='coerce').fillna(0)
+    
+    def merge_qty(person_df):
+        if person_df is None or person_df.empty:
+            return person_df
+
+        # 1. 確保工單編號格式，但不強行轉換 NaN，避免空值變成了字串 "nan"
+        # 我們只對非空值的部分做 strip
+        person_df['工單編號'] = person_df['工單編號'].astype(str).str.strip().replace('nan', np.nan)
+
+        # 移除舊的開工數量避免衝突
+        if '開工數量' in person_df.columns:
+            person_df = person_df.drop(columns=['開工數量'])
+        
+        # 2. 執行合併
+        result_df = person_df.merge(
+            order_df,
+            left_on='工單編號',
+            right_on='工單號碼',
+            how='left'
+        )
+
+        # 3. 移除多餘欄位
+        if '工單號碼' in result_df.columns:
+            result_df = result_df.drop(columns=['工單號碼'])
+
+        print(completion_map)
+        wo_keys = result_df['工單編號'].astype(str).str.strip()
+        result_df['完工數量'] = wo_keys.map(completion_map).fillna(0)
+
+        # --- 🚀 關鍵修正點：處理空值與 0 ---
+        # 情況 A：如果工單編號本來就是空的，'開工數量' 會自動是 NaN (顯示為空)
+        # 情況 B：如果工單編號有值但 order_df 找不到，'開工數量' 也會是 NaN
+        # 如果你希望「有編號但找不到」顯示 0，「沒編號」顯示空，可以這樣寫：
+        
+        mask_has_wo = result_df['工單編號'].notna() & (result_df['工單編號'] != '')
+        mask_no_qty = result_df['開工數量'].isna()
+        
+        # 只有「有工單編號」且「沒抓到數量」的才補 0，完全沒編號的就維持 NaN (留空)
+        result_df.loc[mask_has_wo & mask_no_qty, '開工數量'] = 0
+
+        cols_to_drop = ["預計開工日_tmp"]
+        result_df = result_df.drop(columns=[c for c in cols_to_drop if c in result_df.columns])
+
+        # B. 重新排序欄位邏輯
+        cols = [c for c in result_df.columns.tolist()]
+        
+        # 定義移動函數：將某欄位搬到指定索引 (0-based)
+        def move_col(column_list, col_name, to_idx):
+            if col_name in column_list:
+                column_list.insert(to_idx, column_list.pop(column_list.index(col_name)))
+            return column_list
+
+        cols = move_col(cols, "預計開工日", 2)
+        
+        cols = move_col(cols, "預計入庫日", 15)
+
+        cols = move_col(cols, "開工數量", 7)
+
+        cols = move_col(cols, "完工數量", 8)
+
+        result_df = result_df[cols]
+        return result_df
+    
+    A830_df = merge_qty(A830_df)
+    B201_df = merge_qty(B201_df)
+    A159_df = merge_qty(A159_df)
+
+
+    return A830_df, B201_df, A159_df
+
+
 def remaining_paired_detail(df_paired_split, remaining, base_df):
 
     df_paired_split = df_paired_split.copy()
@@ -3841,7 +4010,7 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
 
         paired_successfully = False
         
-        # 🚨 預設變數，用於儲存成功的搭配車數
+        # 預設變數，用於儲存成功的搭配車數
         main_output_car = 0
        
         # --- 遍歷所有可能的搭配方案 ---
@@ -3858,7 +4027,7 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
                 (remaining["品號"].isin([d1_code, d2_code])) &
                 (~remaining["工單編號"].isin(paired_ids)) &
                 (remaining["預估良品數"] > 0) &
-                (remaining["工單編號"] != main_id) # ⚠️ 確保不自己搭自己
+                (remaining["工單編號"] != main_id) # 確保不自己搭自己
             ]
 
             if candidates.empty:
@@ -3887,7 +4056,7 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
 
         # --- 計算分配刀次 (使用搭配方案的車數) ---
         
-        # ⚠️ 修正：這裡的主工單應使用搭配方案的車數 (main_output_car) 來計算最大刀次
+        # 修正：這裡的主工單應使用搭配方案的車數 (main_output_car) 來計算最大刀次
         max_main_cut = main_remain_qty // main_output_car if main_output_car > 0 else 0 
         
         max_sub_cut = remaining_qty_map[sub_id] // sub_car if sub_car > 0 else 0
@@ -3918,7 +4087,7 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
         paired_main["預估良品數"] = alloc_main_qty
         paired_main["餘量"] = alloc_main_qty
         paired_main["刀次"] = split_cut
-        # 🚨 關鍵修正 2：更新 paired_main 的車數
+        # 關鍵修正 2：更新 paired_main 的車數
         paired_main["車數"] = main_output_car 
         if width_map.get(main_item):
             paired_main["公分"] = width_map[main_item]
@@ -3947,10 +4116,6 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
     for idx, row in remaining.iterrows():
         # ⚠️ 這裡需要確保 remaining 內的工單的車數也被更新
         remain_qty = remaining_qty_map.get(row["工單編號"], 0)
-        
-        # ... (省略：如果這張工單是配對成功後還有剩餘的，它的車數應該維持舊的還是新的？
-        #      由於 remaining 只是剩餘池，通常會維持原樣，直到下次作為主工單才計算。
-        #      因此，我們只更新數量，不更新 remaining 內的車數。)
         
         if remain_qty > 0:
             new_row = row.copy()
@@ -3997,7 +4162,7 @@ def check_Qty(A830_part_end, B201_part_end, A159_part_end):
                 real_print(error_msg)
                 
                 # 💡 重點 2：直接離開，不要 raise，這樣就不會有 Traceback
-                sys.exit(1)
+                #sys.exit(1)
 
         print("✅ 數量防呆檢查通過！")
         return True
@@ -4009,7 +4174,6 @@ def check_Qty(A830_part_end, B201_part_end, A159_part_end):
         # 系統級報錯也用 real_print 輸出乾淨字串
         real_print(f"❌ 防呆檢查時發生系統錯誤：{e}")
         sys.exit(1)
-
 
 
 def check_df_paired_split_2(df_paired, extra_remaining, base_df):
@@ -4134,11 +4298,12 @@ def check_df_paired_split_2(df_paired, extra_remaining, base_df):
     # 3. 遍歷主工單並嘗試配對
     for index, main_order in df_anomalous.iterrows():
         main_order_id = main_order["工單編號"]
-        main_item_code = main_order["品號"]
-        
+
         if str(main_order_id).startswith("81B"):
             continue
-
+        
+        main_item_code = main_order["品號"]
+        
         if main_order_id in used_order_ids:
             continue
             
@@ -4850,7 +5015,7 @@ def do_people(final_df):
     return A159_part, A830_part, B201_part
 
 
-def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookback_days: int = 65) -> pd.DataFrame:
+def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookback_days: int = 165) -> pd.DataFrame:
 
     df = df.copy()
     df["預計開工日"] = pd.to_datetime(df["預計開工日"])
@@ -4935,6 +5100,7 @@ def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookba
     df_new = split_schedule_dates(df)
 
     return df_new
+
 
 
 def final_cal_list_person(df: pd.DataFrame, start_d: datetime.date, holiday_map: dict) -> pd.DataFrame:
@@ -5118,7 +5284,7 @@ def final_schedule_list_second(A159_part, A830_part, B201_part, break_dates):
             schedule_A830 = final_cal_list_person(schedule_A830, start_d=user_schedule_date, holiday_map=break_dates["A830"])
             print(f"偵錯 F (A830): 第一次 final_cal_list_person 執行後筆數: {len(schedule_A830)}") 
             schedule_A830 = sort_by_customer_due_date(schedule_A830)
-            print(f"偵錯 H (A830): sort_by_customer_due_date 執行後筆數: {len(schedule_A830)}") # 💡 新增偵錯點 H
+            print(f"偵錯 H (A830): sort_by_customer_due_date 執行後筆數: {len(schedule_A830)}")
             schedule_A830 = final_cal_list_person(schedule_A830, start_d=user_schedule_date, holiday_map=break_dates["A830"])
             print(f"偵錯 G (A830): 第二次 final_cal_list_person 執行後筆數: {len(schedule_A830)}")
         except Exception as e:
@@ -5195,6 +5361,7 @@ def final_schedule_list_second(A159_part, A830_part, B201_part, break_dates):
 
     # 旺斌
     if not schedule_B201.empty and schedule_B201["刀次"].notna().any() and (schedule_B201["刀次"] > 0).any():
+        print(f"偵錯 D (B201): 刀次 Dtype: {schedule_B201['刀次'].dtype}")
         # 計算預估良品數
         mask = schedule_B201["刀次"] > 0
         schedule_B201.loc[mask, "預估良品數"] = schedule_B201.loc[mask, "刀次"] * schedule_B201.loc[mask, "車數"]
@@ -5218,6 +5385,8 @@ def final_schedule_list_second(A159_part, A830_part, B201_part, break_dates):
                 errors="coerce"
             )
 
+        print(f"偵錯 E (B201): 實際排程日期 NaT 數量: {schedule_B201['實際排程日期'].isna().sum()}")
+
         # 建立主工單識別碼（將主+子工單視為同一組）
         schedule_B201["主工單識別碼"] = schedule_B201["主工單編號"].fillna(method='ffill')
 
@@ -5234,8 +5403,11 @@ def final_schedule_list_second(A159_part, A830_part, B201_part, break_dates):
         # 丟進排程邏輯（使用 datetime 版本）
         try:
             schedule_B201_1 = final_cal_list_person(schedule_B201, start_d=user_schedule_date, holiday_map=break_dates["B201"])
+            print(f"偵錯 F (B201): 第一次 final_cal_list_person 執行後筆數: {len(schedule_B201_1)}") 
             schedule_B201_2 = sort_by_customer_due_date(schedule_B201_1)
+            print(f"偵錯 H (B201): sort_by_customer_due_date 執行後筆數: {len(schedule_B201_2)}")
             schedule_B201_3 = final_cal_list_person(schedule_B201_2, start_d=user_schedule_date, holiday_map=break_dates["B201"])
+            print(f"偵錯 F (B201): 第二次 final_cal_list_person 執行後筆數: {len(schedule_B201_3)}") 
         except Exception as e:
             print("發生錯誤:", e)
 
@@ -5252,7 +5424,6 @@ def final_schedule_list_second(A159_part, A830_part, B201_part, break_dates):
     
 
     return schedule_A830, schedule_A159_3, schedule_B201_3
-
 
 
 def balance_completion_time(df_A159: pd.DataFrame, df_A830: pd.DataFrame, df_B201: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -5391,75 +5562,6 @@ def merge_final_result(A830_part_end, B201_part_end, A159_part_end):
 
     return final_df
 
-'''
-def apply_final_rotation(df_A830, df_B201, df_A159, week_81B_user):
-    """
-    嚴格循環輪替：A159 -> A830 -> B201
-    基準點：2024-12-30 為 A159 輪替週的開始
-    """
-    full_df = pd.concat([df_A830, df_B201, df_A159], ignore_index=True)
-    if full_df.empty:
-        return df_A830, df_B201, df_A159
-
-    # 1. 準備日期
-    full_df['預計開工日_dt'] = pd.to_datetime(full_df['預計開工日'], errors='coerce')
-    
-    # --- 核心：嚴格計算週次循環 ---
-    # 設定一個固定的週一作為基準日 (2024/12/30 是 2025 W01 的開始)
-    reference_date = pd.Timestamp('2024-12-30')
-    
-    # 計算開工日距離基準日過了幾天，再除以 7 得到「第幾週」
-    # 使用 // 7 確保得到整數週數
-    full_df['輪替週序'] = (full_df['預計開工日_dt'] - reference_date).dt.days // 7
-    
-    # 2. 以工單 ID 為單位，鎖定首日週序 (解決大工單跨週問題)
-    full_df = full_df.sort_values(by=['預計開工日_dt', '唯一主工單ID'])
-    order_first_day = full_df.groupby('唯一主工單ID').agg({
-        '輪替週序': 'first',
-        '人員': 'first',
-        '品號群組': 'first'
-    }).reset_index()
-
-    # 3. 定義嚴格輪替順序
-    rotation_order = ["A159", "A830", "B201"]
-
-    def get_final_person(row):
-        try:
-            # 取得該工單首日對應的循環索引 (0, 1, 2)
-            cycle_idx = int(row['輪替週序']) % 3
-            standby_person = rotation_order[cycle_idx]
-            #standby_person = week_81B_user
-            print(standby_person)
-            
-            is_81B = str(row['品號群組']).startswith('81B')
-            current_p = row['人員']
-
-            if is_81B:
-                # 81B 律定給本週待命者
-                return standby_person
-            else:
-                # 81A 若撞到待命者，移交給 A159 (81B 預設者)
-                if current_p == standby_person:
-                    return "A159"
-                else:
-                    return current_p
-        except:
-            return row['人員']
-
-    # 4. 套用結果
-    order_first_day['最終人員'] = order_first_day.apply(get_final_person, axis=1)
-    mapping = dict(zip(order_first_day['唯一主工單ID'], order_first_day['最終人員']))
-    full_df['人員'] = full_df['唯一主工單ID'].map(mapping)
-
-    # 5. 清理輔助欄位並拆分
-    full_df.drop(columns=['預計開工日_dt', '輪替週序'], inplace=True, errors='ignore')
-    
-    new_A830 = full_df[full_df['人員'] == 'A830'].copy()
-    new_B201 = full_df[full_df['人員'] == 'B201'].copy()
-    new_A159 = full_df[full_df['人員'] == 'A159'].copy()
-
-    return new_A830, new_B201, new_A159
-'''
 
 def apply_final_rotation(df_A830, df_B201, df_A159):
     """
@@ -5666,7 +5768,11 @@ def final_clean_and_reorder(df, order_df):
 
     # --- 步驟 3: 處理主工單並關聯開工/完工 ---
     main_df = df[df['刀次'] != 0].copy().drop_duplicates(subset=['工單編號']) 
-    
+    cols_to_drop = [c for c in ['開工數量', '完工數量'] if c in main_df.columns]
+    if cols_to_drop:
+        main_df = main_df.drop(columns=cols_to_drop)
+
+
     if order_df is not None and not order_df.empty:
         order_subset = order_df[['工單號碼', '開工數量', '完工數量']].drop_duplicates(subset=['工單號碼']).copy()
         main_df = pd.merge(main_df, order_subset, left_on="工單編號", right_on="工單號碼", how='left')
@@ -5696,7 +5802,7 @@ def final_clean_and_reorder(df, order_df):
     final_df['須補數量'] = final_df['餘數'] - final_df['預估良品']
     final_df['多切工單'] = ""
 
-    base_cols = ['主工單號', '料號', '客戶需求日', '預計開工日', '預計入庫日', '開工數量', '預估良品', '餘數', '須補數量', '多切工單'] 
+    base_cols = ['主工單號', '料號', '客戶需求日', '預計開工日', '預計入庫日', '開工數量', '完工數量', '預估良品', '餘數', '須補數量', '多切工單'] 
     partner_cols = []
     for i in range(1, 6): 
         for suffix in ['工單', '料號', '數量']:
@@ -5821,7 +5927,7 @@ def schedule_daily_reset(df_A830, df_B201, df_A159):
 
 def main():
 
-    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, week_81B_user
+    global start_date, end_date, user_schedule_date, break_date_list, schedule_start_date, completion_map
 
     # 初階段工單分類 (輸入開始結束日期，根據config找到基本資料)
     result = process_schedule_data()  
@@ -5835,6 +5941,7 @@ def main():
     df_d1 = result["paired_df_d1"]
     base_df = result["base_df"]
     order_df = result["order_df"]
+
 
     
     # 無須配對的工單進行分組尚未排程
@@ -5878,7 +5985,7 @@ def main():
     # 整理全部工單 -> 多餘車數
     final_remaining_new, all_final = cleanup_all(final_remaining_new, all)
 
-    # 根據同公分 同料原則 優先順序 -> 1.滿足交期 2.同公分且同料 3.同公分 4.同料
+    # 根據同公分 同料原則 優先順序 -> 1.滿足交期 2.同公分且同料 3.同料 4.同公分
     # 排版,依照預計開工時間排序
     final_output = prepare_final_schedule(all_final, final_remaining_new, df_history, base_df)
 
@@ -5896,7 +6003,7 @@ def main():
 
     # 人員分類
     A159_part, A830_part, B201_part = do_people(sorted_df_end)
- 
+    
     A830_part_end_list, A159_part_end_list, B201_part_end_list = final_schedule_list_second(A159_part, A830_part, B201_part, break_dates)
 
     try:
@@ -6018,6 +6125,7 @@ def main():
     result_check = check_Qty(A830_part_end, B201_part_end, A159_part_end)
     print(result_check)
 
+    # 因應每日需求 要觀察前一天以及後一天的工單 第一天最後一筆如果能跟第二天第一筆做呼應最好 減少一次換線時間
     A830_new, B201_new, A159_new = schedule_daily_reset(A830_part_end, B201_part_end, A159_part_end)
 
     result_check = check_Qty(A830_new, B201_new, A159_new)
@@ -6025,8 +6133,6 @@ def main():
 
     # 最後81B三班制分類
 
-    #A830_new, B201_new, A159_new = apply_final_rotation(A830_part_end, B201_part_end, A159_part_end)
-    
     # ==============================================================================================================
     # === 寫入 Excel ===
     # 1. 準備統計資料 (計算 user_schedule_date 當天的刀次)

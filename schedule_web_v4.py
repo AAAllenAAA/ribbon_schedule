@@ -260,11 +260,16 @@ def process_schedule_data():
     schedule_start_date = datetime.strptime(schedule_start_date_str, "%Y-%m-%d")
 
     file_path = config_user.get("uploaded_file")
+
+    exclude_material = config_user.get("lack_material")
+    exclude_list = [m.strip() for m in exclude_material.split(',') if m.strip()]
+
     print(start_date)
     print(end_date)
     print(break_date_list)
     print(schedule_start_date)
     print(file_path)
+    print(exclude_list)
 
     base_path = config_user.get("base_path")
 
@@ -309,6 +314,8 @@ def process_schedule_data():
     # 合併資料
     base_df_unique = base_df.drop_duplicates(subset=['料號'], keep='first').copy()
     merged = pd.merge(order_df, base_df_unique, how="left", on="料號")
+    # 排除缺料的原料材質
+    merged = merged[~merged["原料材質"].str.strip().isin(exclude_list)]
     merged["總長度(cm)"] = merged["寬度Cm"] * merged["車數"]
     merged["刀次"] = (merged["開工數量"] / merged["車數"]).apply(lambda x: round(x, 2) if x > 0 else 0)
 
