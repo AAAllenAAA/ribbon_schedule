@@ -50,7 +50,7 @@ def block_print(*args, **kwargs):
 real_print = print
 
 # 全部 print 暫時關閉
-print = block_print
+#print = block_print
 
 def universal_excel_loader(file_path):
     # 1. 取得絕對路徑（Excel COM 元件要求必須是絕對路徑）
@@ -271,7 +271,7 @@ def process_schedule_data():
     print(file_path)
     print(exclude_list)
 
-    base_path = config_user.get("base_path")
+    #base_path = config_user.get("base_path")
 
     # 讀取資料
     #order_df = pd.read_excel(file_path, dtype=str)
@@ -333,8 +333,8 @@ def process_schedule_data():
         orders_placeholder = "('" + "','".join(map(str, target_orders)) + "')"
         print(orders_placeholder)
         try:
+            # 找出工單list內庫存完工量
             conn = mysql.connector.connect(**db_config)
-            today_str = datetime.now().strftime('%Y-%m-%d')
             sql_query = f"""
                 SELECT 
                     T.wo_SN_clean,
@@ -366,7 +366,6 @@ def process_schedule_data():
                         GROUP BY wo_SN
                     ) B_Sub ON A.wo_SN = B_Sub.wo_SN
                     WHERE A.wo_SN IN {orders_placeholder}
-                    AND A.wo_ForceSDate <= '{today_str}'
                     GROUP BY A.wo_SN
                 ) AS T
             """
@@ -401,6 +400,81 @@ def process_schedule_data():
         except Exception as e:
             print(f"❌ 資料庫同步失敗: {e}")
 
+        try:
+            #找出資料庫中已經先預排上傳的工單 並且將其產能(刀次)加到break_date_list中 使之後排程不會有問題
+            conn2 = mysql.connector.connect(**db_config)
+            #schedule_start_date, orders_placeholder, break_date_list
+            sql_query2 = f"""
+                SELECT 
+                w.wo_SN,
+                w.wo_CutNum,
+                w.woToUserUID,
+                w.wo_ForceSDate
+                FROM workorder w
+                WHERE wo_SN IN {orders_placeholder}
+                AND w.wo_ForceSDate >= '{schedule_start_date}'
+            """
+            db_df2 = pd.read_sql(sql_query2, conn2).fillna(0)
+            conn2.close()
+            print("\n資料庫回傳的預排內容：")
+            print(db_df2)
+
+        except Exception as e:
+            print(f"❌ 資料庫查詢失敗: {e}")
+
+
+        # --- 開始對應並更新 break_date_list (情境一：換算為車數/比率) ---
+        try:
+            # 💡 修正基準：55 刀等於 1.0 車
+            KNIVES_PER_CAR = 55.0 
+
+            if not db_df2.empty:
+                print("\n🔄 開始將預排工單換算為車數，並從人員「剩餘產能」中扣除...")
+                
+                for index, row in db_df2.iterrows():
+                    user_id = str(row['woToUserUID']).strip().upper()
+                    cut_num = int(row['wo_CutNum'])
+                    wo_sn = row['wo_SN']
+                    
+                    # 1. 日期型態精準轉換
+                    raw_date = row['wo_ForceSDate']
+                    if pd.isna(raw_date):
+                        continue
+                    if isinstance(raw_date, pd.Timestamp):
+                        target_date = raw_date.to_pydatetime().date()
+                    elif isinstance(raw_date, datetime):
+                        target_date = raw_date.date()
+                    else:
+                        target_date = pd.to_datetime(raw_date).date()
+
+                    # 2. 將刀次轉換為要扣除的車數比率
+                    calculated_car_ratio = cut_num / KNIVES_PER_CAR
+
+                    # 3. 檢查人員是否存在於大字典中
+                    if user_id in break_date_list:
+                        
+                        # 💡 4. 關鍵修改：如果當日沒紀錄，代表剩餘產能全新滿載，預設值給 1.0
+                        current_remaining_ratio = break_date_list[user_id].get(target_date, 1.0)
+                        
+                        # 💡 5. 關鍵修改：改成「用扣的」計算剩餘產能
+                        new_remaining_ratio = current_remaining_ratio - calculated_car_ratio
+                        
+                        # 更新數值回去（四捨五入到小數第二位防浮點數誤差）
+                        break_date_list[user_id][target_date] = round(new_remaining_ratio, 2)
+                        
+                        print(f" 🎯 工單 {wo_sn}: 人員 {user_id} 在 {target_date} 預排了 {cut_num} 刀 "
+                              f"(扣除 {round(calculated_car_ratio, 2)} 車)，該日「剩餘可用」產能: {break_date_list[user_id][target_date]} 車")
+                    else:
+                        print(f" ❌ 錯誤: 找不到工號 {user_id} 的人員資料 (工單: {wo_sn})")
+                        
+                print("\n✅ 預排產能扣除與卡位完成！")
+                print("更新後的 break_date_list 結果：", break_date_list)
+            else:
+                print("\nℹ️ 沒有找到任何符合時間區間的預排工單，無需扣除人員產能。")
+                
+        except Exception as e:
+            print(f"❌ 更新人員產能行事曆失敗: {e}")
+
 
 
     # --- 2. 處理歷史資料 (獨立區塊) ---
@@ -419,6 +493,8 @@ def process_schedule_data():
         df_history_used_qty = df_history.groupby(['工單號碼', '料號'], as_index=False)['預估良品數'].sum()
         df_history_used_qty = df_history_used_qty.rename(columns={'預估良品數': '昨日已排數量'})
         df = df.merge(df_history_used_qty, on=['工單號碼', '料號'], how='left').fillna(0)
+        print("=============================================================")
+        print(df)
 
     # --- 3. 過濾與清理 (移出歷史資料區塊) ---
     
@@ -452,7 +528,7 @@ def process_schedule_data():
     merged = df.copy()
 
     # ==========================================================
-    #  階段 0: 備註超級優先權 (Remark King Logic)
+    #  階段 0: 備註優先權
     # ==========================================================
     pair_rows_remark = []
     used_order_ids = set()
@@ -686,7 +762,7 @@ def process_schedule_data():
             continue
 
         # 逐 candidate 嘗試
-        paired_this_main = False
+        #paired_this_main = False
         for cand in candidates[main_item_code]:
             child_codes = cand["child_codes"]
             child_outs = cand["child_outs"]
@@ -795,7 +871,7 @@ def process_schedule_data():
             if main_item_code in remaining_by_item:
                 remaining_by_item[main_item_code] = [r for r in remaining_by_item.get(main_item_code, []) if r["工單號碼"] not in used_order_ids]
 
-            paired_this_main = True
+            #paired_this_main = True
             break  # 此主工單已配到，跳出 candidate 迴圈（採貪婪第一配對）
 
         # end for each candidate
@@ -1040,10 +1116,7 @@ def split_no_pair_rows(df_no_pair, max_knife=60):
         
         # 計算刀次（無條件進位）
         if cars == 0:
-            # 方案 A: 如果車數為 0，則刀次也應視為 0 或 1 (取決於業務邏輯)
-            # 在許多情況下，如果車數為 0，則表示該工單數據無效或無需生產，可以將刀次設為 0
             knife = 0 
-            # 如果業務上認為車數為 0 不可能發生，這裡可能需要 log 錯誤或將其設為 1 以避免崩潰。
             
         else:
             # 正常計算
@@ -1067,8 +1140,12 @@ def split_no_pair_rows(df_no_pair, max_knife=60):
     return pd.DataFrame(rows)
 
 
-# 配對完成工單
-# 先根據配對工單數量先決定好主工單刀次 剩下的再去配對其他工單 目前先他剩下的特別拿出
+# === 工單配對與動態拆分機制 ===
+# 目的：根據主子工單的物料依賴關係進行拆分。
+# 核心邏輯：
+# 1. 優先確保子工單的物料足以支援主工單的刀次消耗。
+# 2. 若子工單量不足，自動縮減該段主工單刀次，並將無法配對的部分撥入「剩餘待排區」。
+# 3. 確保最後產出的總量 (Used + Remaining) 等於原始工單需求。
 def split_paired_rows(df_paired, max_cut=60, debug=False):
     """
     改良版 split_paired_rows
@@ -1078,16 +1155,18 @@ def split_paired_rows(df_paired, max_cut=60, debug=False):
     - debug=True 可印出配對過程
     """
 
+    # 複製一份資料避免改到原始 DataFrame，並重置索引
     df_paired = df_paired.copy().reset_index(drop=True)
-    paired_rows = []
-    remaining_rows = []
+    paired_rows = [] # 存放配對成功的資料
+    remaining_rows = [] # 存放配對失敗或多出來的資料
 
-    # 原始量 map (工單 -> 原始預估良品數)
+    # 建立一個字典：工單編號 -> 原始預估良品數。這是為了最後計算 (原始 - 已用 = 剩餘)
     original_qty_map = df_paired.set_index("工單編號")["預估良品數"].astype(float).to_dict()
 
     i = 0
     while i < len(df_paired):
         current_row = df_paired.iloc[i]
+        # 取得主工單的刀次與車數（主工單的刀次必定 > 0）
         current_cut = math.ceil(float(current_row["刀次"]))
         current_car = int(current_row["車數"])
         main_id = current_row["工單編號"]
@@ -1095,15 +1174,14 @@ def split_paired_rows(df_paired, max_cut=60, debug=False):
         if current_cut > 0:
             main_row = current_row.copy()
 
-            # 收集後面子工單（刀次 = 0）
+            # 收集隨後的所有子工單（直到遇到下一筆主工單或結束）
             sub_rows = []
             j = i + 1
             while j < len(df_paired) and int(df_paired.iloc[j]["刀次"]) == 0:
                 sub_rows.append(df_paired.iloc[j].copy())
                 j += 1
 
-            remaining_cut = current_cut
-            has_paired = False  # 標記這支主工單是否至少配到過一次
+            remaining_cut = current_cut # 記錄這張主工單還有多少刀還沒分配完
 
             # 用子工單的「餘量」欄若存在，優先使用；若沒有，使用原始預估良品數
             for s in sub_rows:
@@ -1112,21 +1190,26 @@ def split_paired_rows(df_paired, max_cut=60, debug=False):
 
             while remaining_cut > 0:
                 # 計算每個子工單能支援的最大主刀次 (floor(餘量 / 子車數))
-                max_sub_cut = remaining_cut
-                total_sub_capacity_cuts = 0  # sum of each sub's floor(餘量 / sub_car)
+                max_sub_cut = remaining_cut # 預設可以配完全部
+                total_sub_capacity_cuts = 0  
+
+                # 遍歷所有子工單，看誰的「餘量」最少，決定了主工單能切多大塊
                 for s in sub_rows:
                     sub_car = int(s["車數"])
                     sub_remain_qty = float(s.get("餘量", s["預估良品數"]))
                     if sub_car <= 0:
                         continue
+
+                    # 該子工單能支援的最大刀次 = 餘量 / 車數 (無條件捨去)
                     max_cut_for_sub = math.floor(sub_remain_qty / sub_car)
-                    # 為了讓主刀次能被所有子支持，取最小值
+                    # 關鍵：主工單的拆分刀次必須「向下對齊」所有子工單的最小容忍度
                     max_sub_cut = min(max_sub_cut, max_cut_for_sub)
                     total_sub_capacity_cuts += max_cut_for_sub
 
-                # split_cut 為本輪實際可拆的刀次（受最大分段與子支援限制）
+                # 本次實際拆分刀次：受限於 max_cut  與 子工單支援力
                 split_cut = min(max_cut, max_sub_cut)
 
+                # --- 狀況 A：物料嚴重不足 (連 1 刀都配不滿) ---
                 if split_cut <= 0:
                     # 子工單不足以支援一個完整 split_cut（可能部分可配）
                     # 若 total_sub_capacity_cuts > 0，代表可以配部分（以 cuts 為單位）
@@ -1138,24 +1221,26 @@ def split_paired_rows(df_paired, max_cut=60, debug=False):
                         # 生成主工單配對段
                         main_piece = main_row.copy()
                         main_piece["刀次"] = partial_cut
-                        main_piece["預估良品數"] = partial_cut * current_car
+                        main_piece["預估良品數"] = partial_cut * current_car # 數量隨刀次變動
                         main_piece["餘量"] = main_piece["預估良品數"]
                         paired_rows.append(main_piece)
-                        has_paired = True
 
-                        # 向各子工單分配實際數量（以量為單位）
+                        # 同步更新子工單
                         for s in sub_rows:
                             sub_car = int(s["車數"])
                             if sub_car <= 0:
                                 continue
                             sub_remain_qty = float(s.get("餘量", s["預估良品數"]))
+                            # 子工單分配量 = 主工單刀次 * 子工單車數 (不可超過子工單剩餘量)
+
                             alloc_qty = min(sub_remain_qty, partial_cut * sub_car)
                             if alloc_qty <= 0:
                                 continue
+
                             sub_piece = s.copy()
                             sub_piece["刀次"] = 0
                             sub_piece["預估良品數"] = alloc_qty
-                            sub_piece["餘量"] = sub_remain_qty - alloc_qty
+                            sub_piece["餘量"] = sub_remain_qty - alloc_qty # 扣除餘量
                             paired_rows.append(sub_piece)
                             # 更新原始 sub_rows 的餘量（影響後續分配）
                             s["餘量"] = sub_piece["餘量"]
@@ -1179,12 +1264,12 @@ def split_paired_rows(df_paired, max_cut=60, debug=False):
                 if debug:
                     print(f"✅ 主 {main_id} 配 {split_cut} 刀 (量={split_cut * current_car})")
 
+                # --- 狀況 B：正常配對流程 ---
                 main_piece = main_row.copy()
                 main_piece["刀次"] = split_cut
                 main_piece["預估良品數"] = split_cut * current_car
                 main_piece["餘量"] = main_piece["預估良品數"]
                 paired_rows.append(main_piece)
-                has_paired = True
 
                 # 子工單同步分配
                 for s in sub_rows:
@@ -1208,10 +1293,9 @@ def split_paired_rows(df_paired, max_cut=60, debug=False):
                 remaining_cut -= split_cut
 
             # 完成此主工單（不在此處直接 append remaining；最後統一以 used_df 計算 remaining）
-            i = j
+            i = j # 處理完一組，跳至下一組主工單
         else:
-            # 這筆本來就是子工單（沒配對用的主工單），先放到 remaining_rows
-            # （會在最後合併 remaining，但這裡放也可，最終會用 original-used 決定）
+            # 孤立工單：若一開始就是刀次=0 卻沒主工單帶領，直接撥入剩餘區
             remaining_rows.append(current_row.copy())
             i += 1
 
@@ -1387,7 +1471,7 @@ def split_paired_rows_step1(df_paired, remaining_rows=None, max_cut=60):
     df_paired = df_paired.copy().reset_index(drop=True)
     paired_rows = []
 
-    # 確保剩餘是 list
+    # 確保剩餘量是 list 格式，方便後面用 append 增加新內容
     if remaining_rows is None:
         new_remaining_rows = []
     elif isinstance(remaining_rows, pd.DataFrame):
@@ -1411,46 +1495,56 @@ def split_paired_rows_step1(df_paired, remaining_rows=None, max_cut=60):
                 j += 1
 
             remaining_cut = current_cut
+            # [關鍵] 建立一個字典紀錄每個子工單「目前剩多少量」
             sub_remaining = {idx: int(row["預估良品數"]) for idx, row in enumerate(sub_rows)}
 
             while remaining_cut > 0:
                 split_cut = min(max_cut, remaining_cut)
 
+                # 生成主工單拆分段
                 main_piece = main_row.copy()
                 main_piece["刀次"] = split_cut
                 main_piece["預估良品數"] = split_cut * current_car
                 main_piece["餘量"] = main_piece["預估良品數"]
                 paired_rows.append(main_piece)
 
+                # 生成子工單拆分段
                 for idx, sub_row in enumerate(sub_rows):
                     sub_car = int(sub_row["車數"])
                     if sub_car == 0:
                         continue
                     sub_piece = sub_row.copy()
                     sub_piece["刀次"] = 0
+                    # 直接分配：主工單切幾刀，子工單就必須配出 (刀次 * 車數)
                     sub_piece["預估良品數"] = split_cut * sub_car
                     sub_piece["餘量"] = sub_piece["預估良品數"]
                     paired_rows.append(sub_piece)
+
+                    # 從剩餘字典裡扣掉
                     sub_remaining[idx] -= sub_piece["預估良品數"]
 
                 remaining_cut -= split_cut
 
-            # 主工單剩餘量
+            # 如果主工單還有剩（正常情況下 remaining_cut 會是 0，除非邏輯中斷）
             if remaining_cut > 0:
                 leftover_row = main_row.copy()
                 leftover_row["刀次"] = remaining_cut
                 leftover_row["預估良品數"] = remaining_cut * current_car
                 leftover_row["餘量"] = leftover_row["預估良品數"]
+
+                # ... 產生主工單剩餘 row 並放入 new_remaining_rows ...
                 new_remaining_rows.append(leftover_row.to_dict())
 
-            # 子工單剩餘量
+            # 檢查每個子工單的結算量
             for idx, remain_qty in sub_remaining.items():
                 if remain_qty > 0:
+                    # 如果 sub_remaining 是正數，代表這張子工單「配完還有剩」，要把剩的量丟回待排區
                     leftover_sub = sub_rows[idx].copy()
                     leftover_sub["刀次"] = 0
                     leftover_sub["預估良品數"] = remain_qty
                     leftover_sub["餘量"] = remain_qty
                     new_remaining_rows.append(leftover_sub.to_dict())
+                    # 注意：如果 remain_qty 是負數，代表配超量了，這在 Step 1 暫不處理（留在之後校正）
 
             i = j
         else:
@@ -2153,6 +2247,9 @@ def remaining_cut_clean_and_repair(df_paired_split, df, order_df, mode="88cm", c
             row_i = df.loc[idx_i]
             main_order_id = str(row_i["工單編號"])
 
+            if main_order_id.startswith("81B"):
+                continue
+
             # 🌟 核心防呆：從 order_df 抓取最原始的開工數量
             # 如果查不到，就退而求其次用當前的預估良品數
             raw_qty_i = qty_ref.get(main_order_id, row_i["預估良品數"])
@@ -2161,6 +2258,9 @@ def remaining_cut_clean_and_repair(df_paired_split, df, order_df, mode="88cm", c
                 idx_j = group.at[j, "index"]
                 if idx_j in merged_indices: continue
                 row_j = df.loc[idx_j]
+
+                if str(row_j["工單編號"]).startswith("81B"):
+                    continue
                 
                 if row_i["品號結尾"] != row_j["品號結尾"]: continue
 
@@ -3486,21 +3586,16 @@ def safe_int_conversion(value: Any, default: int = 0) -> int:
 
 
 def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFrame,
-                       daily_standard: int = 165) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       break_dates: dict = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    將每個人 (A_df, B_df, C_df) 的工單往前遞補滿每日標準刀次。
-    修正邏輯：
-    1. 每次補刀時即時計算當日品號種類數與新上限，避免超過限制。
-    2. 超額遞延時，優先推遲至下一個「已有排程」的日期，避免隨意創造新日期。
+    修正版：嚴格遵守權重 (availability)，防止未來工單被錯誤地提前合併。
     """
-
     MAX_KNIFE_MAP = {1: 60, 2: 55, 3: 51, 4: 47, 5: 43, 6: 39}
     prefix_rules = {"B110": 5, "TTR": 4, "UTMX": 4, "UTM": 3}
     default_prefix_len = 3
 
     def get_item_group_key(item_code: str) -> str:
-        if not isinstance(item_code, str):
-            return "UNKNOWN"
+        if not isinstance(item_code, str): return "UNKNOWN"
         item_code = item_code.strip().replace('.', '')
         for prefix in sorted(prefix_rules.keys(), key=len, reverse=True):
             length = prefix_rules[prefix]
@@ -3509,166 +3604,133 @@ def merge_order_cutNum(A_df: pd.DataFrame, B_df: pd.DataFrame, C_df: pd.DataFram
         return item_code[:default_prefix_len] if len(item_code) >= default_prefix_len else item_code
 
     def process_one(df: pd.DataFrame, person_name: str) -> pd.DataFrame:
-        if df is None or df.empty:
-            return df.copy()
+        if df is None or df.empty: return df.copy()
         
         df = df.copy().reset_index(drop=True)
         df["預計開工日"] = pd.to_datetime(df["預計開工日"], errors="coerce")
         df["預計完工日"] = pd.to_datetime(df["預計完工日"], errors="coerce")
 
-        # 初始化 orders
+        # 初始化資料結構
         orders = []
         last_main = None
         for i, row in df.iterrows():
             knives = safe_int_conversion(row.get("刀次", 0))
-            cars = safe_int_conversion(row.get("車數", 0))
-            od = {"orig_idx": i, "orig_row": row.copy(), "remain": knives, "car": cars, "children": [], "slices": {}}
+            od = {"orig_idx": i, "orig_row": row.copy(), "slices": {}, "children": []}
             if knives > 0:
                 od["slices"][row["預計開工日"].normalize()] = knives
-                last_main = od
                 orders.append(od)
-            else:
-                if last_main is not None:
-                    last_main["children"].append(row.copy())
-                else:
-                    orders.append(od)
-                    last_main = od
+                last_main = od
+            elif last_main is not None:
+                last_main["children"].append(row.copy())
 
-        if not orders:
-            return df
-
-        # 取得所有原始排程日期並排序
         all_dates = sorted({d.normalize() for od in orders for d in od["slices"].keys() if pd.notna(d)})
 
-        # === 核心排程迴圈：使用 while 進行動態日期管理 ===
         date_idx = 0
         while date_idx < len(all_dates):
             current_date = all_dates[date_idx]
             
-            # 1. 計算當日初始狀態
+            # 取得當日人員權重
+            availability = 1.0
+            # 修正點：將人員代碼與字典 key 對齊，並直接使用 .date() 物件去比對
+            
+            # 根據你提供的格式，這裡需要對應 A159, A830, B201
+            short_name = person_name.split('(')[-1].replace(')', '').strip() # 提取 A830, B201 等
+            
+            if break_dates and short_name in break_dates:
+                # 核心修正：直接用 .date() 去找，不要轉成 strftime 字串
+                availability = break_dates[short_name].get(current_date.date(), 1.0)
+
             daily_ods = [od for od in orders if current_date in od["slices"] and od["slices"][current_date] > 0]
             total_knives = sum(od["slices"][current_date] for od in daily_ods)
             existing_keys = {get_item_group_key(od["orig_row"].get("品號")) for od in daily_ods}
-            
-            # 2. 計算即時上限
-            num_items = len(existing_keys)
-            day_limit = MAX_KNIFE_MAP.get(num_items, 65 if num_items == 0 else 39)
 
-            # --- PHASE 1: 修正後的【超額遞延】邏輯 ---
+            # --- PHASE 1: 超額遞延 ---
+            num_items = len(existing_keys)
+            day_limit = int(MAX_KNIFE_MAP.get(num_items, 39) * availability)
             excess = total_knives - day_limit
+
+            # 修正 Print 變數名稱，確保印出的是正確計算後的 day_limit
+            print(f"[{current_date.date()}] 人員: {short_name}, 刀數: {total_knives}, 權重: {availability}, 上限: {day_limit}")
             
             if excess > 0:
-                # 找出當日排程中，刀次最大的工單優先推遲
-                ods_to_push = sorted(
-                    daily_ods, 
-                    key=lambda od: (-od["slices"][current_date], od["orig_idx"]) 
-                )
-                
-                # 【修改點】: 尋找下一個合適的日期，而不是盲目 +1 天
                 future_dates = [d for d in all_dates if d > current_date]
-                if future_dates:
-                    # 如果未來原本就有排程日（例如 4/13），就推到最近的那一天
-                    next_date = min(future_dates)
-                else:
-                    # 如果後面完全沒單了，才推到下一個「工作日」(避開週末)
-                    next_date = current_date + pd.offsets.BusinessDay(1)
-                    if next_date not in all_dates:
-                        all_dates.append(next_date)
-                        all_dates.sort()
+                next_date = min(future_dates) if future_dates else current_date + pd.offsets.BusinessDay(1)
+                if next_date not in all_dates:
+                    all_dates.append(next_date); all_dates.sort()
 
-                pushed_amount = 0
+                ods_to_push = sorted(daily_ods, key=lambda od: (-od["slices"][current_date], od["orig_idx"]))
                 for od in ods_to_push:
-                    if excess <= 0:
-                        break
-                        
+                    if excess <= 0: break
                     push_target = min(od["slices"][current_date], excess)
-                    
-                    # 執行遞延：將刀次從 current_date 移到 next_date
                     od["slices"][current_date] -= push_target
-                    od["slices"][next_date] = od["slices"].get(next_date, 0) + push_target 
-                    
+                    od["slices"][next_date] = od["slices"].get(next_date, 0) + push_target
                     excess -= push_target
-                    pushed_amount += push_target
+                total_knives = day_limit
+
+            # --- PHASE 2: 修正後的【不足遞補】邏輯 ---
+            if total_knives < day_limit:
+                future_cand = []
+                for od in orders:
+                    for sdate, amt in od["slices"].items():
+                        if pd.notna(sdate) and sdate > current_date and amt > 0:
+                            future_cand.append((sdate, od, amt))
+                future_cand.sort(key=lambda x: (x[0], x[1]["orig_idx"]))
+
+                while future_cand:
+                    pick_date, pick_od, pick_amt = future_cand.pop(0)
+                    pick_key = get_item_group_key(pick_od["orig_row"].get("品號"))
+                    pick_work_order = pick_od['orig_row'].get('工單單號', 'N/A')
                     
-                total_knives -= pushed_amount
+                    # 重新計算加入新工單後的權重上限
+                    temp_keys = existing_keys | {pick_key}
+                    new_limit = int(MAX_KNIFE_MAP.get(len(temp_keys), 39) * availability)
+                    
+                    remaining_capacity = new_limit - total_knives
+                    if remaining_capacity <= 0: 
+                        print(f"  - 拒絕挪移: 工單 {pick_work_order} (來自 {pick_date.date()})。原因: 已達權重上限 {new_limit}")
+                        break # 已達權重上限，停止從未來拉單
 
-            # --- PHASE 2: 原始【不足遞補】邏輯 (Pull-in Under-Capacity) ---
-            future_cand = []
-            for od in orders:
-                for sdate, amt in od["slices"].items():
-                    if pd.notna(sdate) and sdate > current_date and amt > 0:
-                        future_cand.append((sdate, od, amt))
-            future_cand.sort(key=lambda x: (x[0], x[1]["orig_idx"]))
+                    fill_target = min(pick_amt, remaining_capacity)
+                    
+                    # 執行挪移
+                    pick_od["slices"][pick_date] -= fill_target
+                    if pick_od["slices"][pick_date] <= 0: del pick_od["slices"][pick_date]
+                    pick_od["slices"][current_date] = pick_od["slices"].get(current_date, 0) + fill_target
+                    
+                    total_knives += fill_target
+                    existing_keys.add(pick_key)
+                    # 更新未來候選清單中的剩餘量
+                    future_cand = [(d, o, a) for d, o, a in future_cand if o["slices"].get(d, 0) > 0]
 
-            while future_cand:
-                pick_date, pick_od, pick_amt = future_cand[0]
-                pick_key = get_item_group_key(pick_od["orig_row"].get("品號"))
-
-                new_existing_keys = existing_keys | {pick_key}
-                new_num_items = len(new_existing_keys)
-                new_day_limit = MAX_KNIFE_MAP.get(new_num_items, 39)
-
-                remaining_capacity = new_day_limit - total_knives
-                if remaining_capacity <= 0:
-                    break
-
-                fill_target = min(pick_amt, remaining_capacity)
-                if fill_target <= 0:
-                    break
-
-                # 執行遞補
-                pick_od["slices"][pick_date] -= fill_target
-                if pick_od["slices"][pick_date] <= 0:
-                    del pick_od["slices"][pick_date]
-                pick_od["slices"][current_date] = pick_od["slices"].get(current_date, 0) + fill_target
-
-                total_knives += fill_target
-                existing_keys.add(pick_key)
-
-                future_cand = [(d, o, a) for d, o, a in future_cand if o["slices"].get(d, 0) > 0]
-            
-            # 處理下一天
             date_idx += 1
 
-        # 4. 展開成 DataFrame
+        # 展開資料，保留原始邏輯但修復日期覆蓋
         out_rows = []
         for od in orders:
-            for sdate, amt in sorted(od["slices"].items(), key=lambda x: x[0]):
-                if amt > 0:
-                    main_row = od["orig_row"].copy()
-                    main_row["預計開工日"] = sdate
+            for sdate, amt in sorted(od["slices"].items()):
+                if amt <= 0: continue
+                main_row = od["orig_row"].copy()
+                main_row["預計開工日"] = sdate
+                # 修正點：若原本完工日晚於新開工日，則保留原完工日
+                if sdate > main_row["預計完工日"]:
                     main_row["預計完工日"] = sdate
-                    main_row["刀次"] = int(amt)
-                    main_car = safe_int_conversion(main_row.get("車數", 0))
-                    main_row["預估良品數"] = main_car * int(amt)
-                    out_rows.append(main_row)
-                    
-                    for ch in od["children"]:
-                        ch_row = ch.copy()
-                        ch_row["預計開工日"] = sdate
+                main_row["刀次"] = int(amt)
+                out_rows.append(main_row)
+                for ch in od["children"]:
+                    ch_row = ch.copy()
+                    ch_row["預計開工日"] = sdate
+                    if sdate > ch_row["預計完工日"]:
                         ch_row["預計完工日"] = sdate
-                        ch_row["刀次"] = 0
-                        ch_car = safe_int_conversion(ch_row.get("車數", 0))
-                        ch_row["預估良品數"] = ch_car * int(amt) 
-                        if "餘量" in ch_row.index:
-                            ch_row["餘量"] = ch_row["預估良品數"]
-                        out_rows.append(ch_row)
-
-        if not out_rows:
-            return pd.DataFrame(columns=df.columns)
+                    out_rows.append(ch_row)
 
         out_df = pd.DataFrame(out_rows)
-        out_df["預計開工日"] = out_df["預計開工日"].dt.strftime("%Y-%m-%d")
-        out_df["預計完工日"] = out_df["預計完工日"].dt.strftime("%Y-%m-%d")
+        for col in ["預計開工日", "預計完工日"]:
+            out_df[col] = out_df[col].dt.strftime("%Y-%m-%d")
         return out_df.reset_index(drop=True)
 
-    # 執行三個人員的處理
-    A_out = process_one(A_df, "容合 (A830)")
-    B_out = process_one(B_df, "旺斌 (B201)")
-    C_out = process_one(C_df, "家偉 (A159)")
-
-    return A_out, B_out, C_out
-
+    return (process_one(A_df, "容合 (A830)"), 
+            process_one(B_df, "旺斌 (B201)"), 
+            process_one(C_df, "家偉 (A159)"))
 
 
 
@@ -3986,6 +4048,9 @@ def remaining_paired_detail(df_paired_split, remaining, base_df):
         if main_id in paired_ids:
             continue
 
+        if str(main_id).startswith("81B"):
+            continue
+
         main_item = main_row["品號"]
         main_remain_qty = remaining_qty_map.get(main_id, 0)
         if main_remain_qty <= 0:
@@ -4164,6 +4229,15 @@ def check_Qty(A830_part_end, B201_part_end, A159_part_end):
         sys.exit(1)
 
 
+# 防止在之前的拆分過程中，有些子工單因為品號不對、或是原本就「落單」而被誤判為異常
+# 負責把前幾步「弄散」或「判定異常」的工單重新組合
+'''
+    1. 偵測分離：利用品號前三碼(血緣)檢查，將與主工單不匹配的異常子工單踢入異常區。
+    2. 數據還原：針對異常工單，從全域對照表還原最原始的『預估良品數』與『餘量』。
+    3. 邏輯重組：依據 base_df 的 BOM 規則幫落單工單重新媒合，並反算『精確刀次』。
+    4. 數據同步：強制主子工單步調一致，確保 (主車數 * 刀次) 與 (子車數 * 刀次) 邏輯閉環。
+    5. 資料分流：將救回的工單回歸配對表，無法救回的工單存入 extra_remaining 緩衝區。
+'''
 def check_df_paired_split_2(df_paired, extra_remaining, base_df):
 
     df_paired = df_paired.copy().reset_index(drop=True)
@@ -4847,6 +4921,7 @@ def cleanup_remaining_df_second(df_remaining):
     print("✅ remaining 修正計算完成。")
     return df_cleaned
 
+
 def cleanup_all(remaining, all):
     """
     執行最終清理：
@@ -5092,96 +5167,86 @@ def generate_schedule_for_person(df: pd.DataFrame, holiday_map: dict, max_lookba
 
 
 def final_cal_list_person(df: pd.DataFrame, start_d: datetime.date, holiday_map: dict) -> pd.DataFrame:
-    df = df.copy()
-    if df.empty:
-        return df
-
-    # 1. 統一起始日期型態
-    if isinstance(start_d, pd.Timestamp):
-        start_d = start_d.date()
-    elif isinstance(start_d, str):
-        start_d = pd.to_datetime(start_d).date()
-
+    if df.empty: return df
+    
+    # 1. 初始化
     daily_limits = {0: 60, 1: 60, 2: 55, 3: 60, 4: 55}
     special_limit = 60
-    capacity_used = {} 
-
-    doses = pd.to_numeric(df["刀次"], errors="coerce").fillna(0).tolist()
-    sku_list = df.get("品號", pd.Series([None]*len(doses))).tolist()
-    new_dates = []
+    capacity_used = {}
     
-    current_date_pointer = start_d 
-
-    for dose, sku in zip(doses, sku_list):
-        # 處理子工單或 0 刀次工單：直接跟隨前一筆日期
+    # 將原本的資料轉為 List 方便處理
+    rows = df.to_dict('records')
+    final_rows = []
+    current_date_pointer = pd.to_datetime(start_d).date()
+    
+    idx = 0
+    while idx < len(rows):
+        row = rows[idx].copy()
+        dose = float(row.get("刀次", 0))
+        sku = row.get("品號")
+        
         if dose <= 0:
-            target_dt = new_dates[-1] if new_dates else current_date_pointer
-            # 確保是 date 物件
-            if hasattr(target_dt, 'date'): target_dt = target_dt.date()
-            new_dates.append(target_dt)
+            row["實際排程日期"] = current_date_pointer.strftime("%Y/%m/%d")
+            final_rows.append(row)
+            idx += 1
             continue
 
-        search_count = 0 # 安全防線計數
-        while True:
-            search_count += 1
-            target_date = current_date_pointer.date() if hasattr(current_date_pointer, 'date') else current_date_pointer
-            
-            multiplier = holiday_map.get(target_date, 1.0)
-            wd = target_date.weekday()
-            
-            # 判斷工作日 (一~五) 且 產能權重 > 0
-            if wd < 5 and multiplier > 0:
-                used_info = capacity_used.get(target_date, {"count": 0, "sku_set": set(), "nonzero_sku_list": []})
+        # 尋找可用日期
+        target_date = current_date_pointer
+        target_date_str = target_date.strftime("%Y-%m-%d")
+        multiplier = holiday_map.get(target_date, holiday_map.get(target_date_str, 1.0))
+        wd = target_date.weekday()
 
-                # 決定該日產能上限
-                current_nonzero_skus = [s for s in used_info["nonzero_sku_list"] if s is not None]
-                if sku is not None and sku not in current_nonzero_skus:
-                    current_nonzero_skus.append(sku)
-
-                is_single_sku = (len(set(current_nonzero_skus)) <= 1)
-                is_special_day = (wd in [2, 4])
-                
-                current_base_limit = special_limit if (is_single_sku and is_special_day) else daily_limits.get(wd, 55)
-                limit = int(current_base_limit * multiplier)
-
-                # 🚀 核心修正：如果單筆刀次大於單日總上限，強行塞入這天，避免死迴圈
-                if dose > limit:
-                    print(f"⚠️ 警告: 工單刀次({dose}) > 單日上限({limit})，強制排入 {target_date}")
-                    used_info["count"] += dose
-                    used_info["sku_set"].add(sku)
-                    capacity_used[target_date] = used_info
-                    new_dates.append(target_date)
-                    break 
-
-                # 正常產能檢查
-                if used_info["count"] + dose <= limit:
-                    used_info["count"] += dose
-                    used_info["sku_set"].add(sku)
-                    if sku is not None and sku not in used_info["nonzero_sku_list"]:
-                        used_info["nonzero_sku_list"].append(sku)
-                    
-                    capacity_used[target_date] = used_info
-                    new_dates.append(target_date)
-                    break 
-
-            # 若產能已滿，推移至隔天
+        # 判斷是否為無效工作日
+        if wd >= 5 or multiplier <= 0:
             current_date_pointer += timedelta(days=1)
+            continue
+
+        # 計算當天剩餘產能
+        used_info = capacity_used.get(target_date, {"count": 0, "skus": set()})
+        # 簡單判定：如果是特殊日且單一品號
+        current_base_limit = special_limit if (wd in [2, 4] and (not used_info["skus"] or sku in used_info["skus"])) else daily_limits.get(wd, 55)
+        limit = int(current_base_limit * multiplier)
+        remaining = limit - used_info["count"]
+
+        if remaining <= 0:
+            # 今天滿了，換明天
+            current_date_pointer += timedelta(days=1)
+            continue
+
+        if dose <= remaining:
+            # --- 情況 A: 塞得下，整筆存入 ---
+            used_info["count"] += dose
+            used_info["skus"].add(sku)
+            capacity_used[target_date] = used_info
             
-            # 極端安全防線：搜尋超過 365 天自動放棄
-            if search_count > 365:
-                print(f"❌ 嚴重錯誤: 工單無法排入，已搜尋一年。強制設定於 {target_date}")
-                new_dates.append(target_date)
-                break
+            row["實際排程日期"] = target_date.strftime("%Y/%m/%d")
+            row["預計開工日"] = row["實際排程日期"]
+            row["預計完工日"] = row["實際排程日期"]
+            final_rows.append(row)
+            idx += 1 # 換下一筆工單
+        else:
+            # --- 情況 B: 【物理拆單】 ---
+            # 1. 拆出今天能做的部分
+            today_row = row.copy()
+            today_row["刀次"] = remaining
+            today_row["實際排程日期"] = target_date.strftime("%Y/%m/%d")
+            today_row["預計開工日"] = today_row["實際排程日期"]
+            today_row["預計完工日"] = today_row["實際排程日期"]
+            final_rows.append(today_row)
+            
+            # 更新今天產能為滿額
+            used_info["count"] = limit
+            used_info["skus"].add(sku)
+            capacity_used[target_date] = used_info
+            
+            # 2. 修改原工單剩下的刀次，留在原地下一輪繼續排 (會因為 remaining=0 換到明天)
+            rows[idx]["刀次"] = dose - remaining
+            current_date_pointer += timedelta(days=1)
 
-    # 確保輸出的長度一致
-    if len(new_dates) == len(df):
-        formatted_dates = [d.strftime("%Y/%m/%d") for d in new_dates]
-        df.loc[:, "預計開工日"] = formatted_dates
-        df.loc[:, "預計完工日"] = formatted_dates
-        df.loc[:, "實際排程日期"] = formatted_dates
-    
-    return df
-
+    # 重新組合成新的 DataFrame
+    new_df = pd.DataFrame(final_rows)
+    return new_df
 
 
 def final_schedule_list_second(A159_part, A830_part, B201_part, break_dates):
@@ -6206,12 +6271,12 @@ def main():
 
     # 將剩餘可不用匹配就可以獨立的工單找出 根據基本資料 搭1料號為0或空 , 剩餘數量小於刀次就要強制多切
     result_second = process_schedule_data_second(df_remaining, base_df)
-    df_reamining_second = result_second["remaining_df"]
+    df_remaining_second = result_second["remaining_df"]
     df_no_pair_second = result_second["no_pair_df"]
-    df_reamining_second_final = cleanup_remaining_df(df_reamining_second)
+    df_remaining_second_final = cleanup_remaining_df(df_remaining_second)
     
     # 新增功能 找到可以搭配的 88cm and 68cm
-    df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split_3, df_reamining_second_final, order_df, mode = "88cm") 
+    df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split_3, df_remaining_second_final, order_df, mode = "88cm") 
     df_paired_split, remaining = remaining_cut_clean_and_repair(df_paired_split, remaining, order_df, mode = "68cm") 
 
     # 處理remaining中可以搭配的 加入一種料號 兩種以上搭配方法的邏輯
@@ -6240,6 +6305,9 @@ def main():
     
     # 輸入休假 彈出視窗 選擇人員以及休假日期 -> 統整參數
     sorted_df_end_list, break_dates = final_schedule_list(sorted_df,  df_history)
+
+    print("休假情形:")
+    print(break_dates)
 
     # 載入歷史資料 觀察是否有前一日尚未做完的工單 要繼續做完
     sorted_df_end_list_his = schedule_history_download(sorted_df_end_list, df_history)
@@ -6351,7 +6419,7 @@ def main():
     A830_final_balanced, A159_final_balanced, B201_final_balanced = final_schedule_list_second(A159_part_optimized, A830_part_optimized, B201_part_optimized, break_dates)
 
     # 將工單往前遞補滿每日的標準刀次 
-    A830_part_end_merge, B201_part_end_merge, A159_part_end_merge = merge_order_cutNum(A830_final_balanced, B201_final_balanced, A159_final_balanced) 
+    A830_part_end_merge, B201_part_end_merge, A159_part_end_merge = merge_order_cutNum(A830_final_balanced, B201_final_balanced, A159_final_balanced, break_dates) 
  
     # 最後判斷每天的工單 如果有相同的主工單 那就合併~(包含其子工單也會合併)
     A830_part_end_reorder = reorder_main_and_subs(A830_part_end_merge)
@@ -6581,8 +6649,8 @@ def main():
         #extra_remaining_2.to_excel(writer, sheet_name="配對後剩餘3", index=False)
 
         #df_remaining.to_excel(writer, sheet_name="debug_remaining", index=False)
-        #df_reamining_second.to_excel(writer, sheet_name="剩餘2", index=False)
-        #df_reamining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
+        #df_remaining_second.to_excel(writer, sheet_name="剩餘2", index=False)
+        #df_remaining_second_final.to_excel(writer, sheet_name="剩餘2_final", index=False)
 
         #df_paired_split.to_excel(writer, sheet_name="配對後結果1+2", index=False)
         #remaining.to_excel(writer, sheet_name="配對後剩餘1+2", index=False)
@@ -6724,7 +6792,7 @@ def main():
             note_cell = ws[f"A{note_row}"]
             note_cell.value = (
                 "1.初階段工單分類(根據database)分成三部分 -> 配對, 不須配對, 剩餘\n"
-                "2.將'剩餘'組做處理，確認database中可搭配的料號後去'不須配對'組中尋找是否有可搭切的工單若無可搭配的料號則將工單號碼留空\n"
+                "2.將'剩餘'組做處理，確認database中可搭配的料號後去'不須配對'組中尋找是否有可搭切的工單若無可搭配的料號則將工單號碼留空(81A跟81B正常情況不可做搭配，除非以人工)\n"
                 "3.確認目前所有工單的數量是否有缺少\n"
                 "4.將全部工單進行排序 依照 -> (1)滿足交期, (2)同公分且同原料, (3)同原料, (4)同公分 之優先級\n"
                 "5.輸入休假區間及開始時間\n"
